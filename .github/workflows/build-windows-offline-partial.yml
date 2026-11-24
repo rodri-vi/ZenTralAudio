@@ -1,0 +1,90 @@
+name: Build Windows Offline AI Partial Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-windows-offline-partial.yml"
+      - "requirements-offline-partial.txt"
+      - "scripts/build_offline_partial.py"
+      - "main.py"
+      - "packaging/ZenTralAudio.spec"
+      - "models/deepfilternet_adapter.py"
+      - "models/model_manager.py"
+      - "resources/manifests/models_manifest.json"
+
+permissions:
+  contents: read
+
+jobs:
+  build-offline-partial:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias base
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Instalar runtime mínimo DeepFilterNet3
+        run: |
+          pip install -r requirements-offline-partial.txt
+          python -c "import torch, torchaudio, df; print('torch', torch.__version__); print('torchaudio', torchaudio.__version__); print('DeepFilterNet runtime OK')"
+
+      - name: Instalar FFmpeg real y añadirlo al PATH
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          $realBin = Get-ChildItem -Path "$env:ChocolateyInstall\lib\ffmpeg" -Recurse -Filter "ffmpeg.exe" | Where-Object { $_.Length -gt 1000000 } | Select-Object -First 1 -ExpandProperty DirectoryName
+          if (-not $realBin) { throw "No se encontró FFmpeg real." }
+          "$realBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$realBin\ffmpeg.exe" -version
+
+      - name: Comprobar entorno y recursos
+        shell: pwsh
+        run: |
+          python scripts/check_environment.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/verify_resources.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Ejecutar pruebas automatizadas
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -v -m "unit or integration"
+
+      - name: Construir paquete parcial e inferencia real sin red
+        run: python scripts/build_offline_partial.py --bundle-ffmpeg
+
+      - name: Verificar paquete de prueba parcial
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/ZenTralAudio-Offline-AI-Partial.zip")) {
+            throw "No se generó el ZIP Offline AI parcial."
+          }
+          if (!(Test-Path "dist/ZenTralAudio_Portable/ZenTralAudio.exe")) {
+            throw "Falta ZenTralAudio.exe."
+          }
+          if (!(Test-Path "dist/ZenTralAudio_Portable/models_data/deepfilternet3/.download_verified.json")) {
+            throw "No se copiaron los pesos verificados de DeepFilterNet3."
+          }
+          Get-Item "dist/ZenTralAudio-Offline-AI-Partial.zip"
+
+      - name: Subir paquete de prueba parcial
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZenTralAudio-Offline-AI-Partial
+          path: dist/ZenTralAudio-Offline-AI-Partial.zip
+          if-no-files-found: error
+          retention-days: 30

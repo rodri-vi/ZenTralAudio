@@ -1,0 +1,3 @@
+# Runtime adicional mínimo para la prueba parcial Offline AI.
+# PyTorch y Torchaudio ya están fijados en requirements-dev.txt.
+deepfilternet==0.5.6
