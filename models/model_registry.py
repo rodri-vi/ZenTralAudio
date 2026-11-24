@@ -28,7 +28,6 @@ class ModelRegistry:
             MossFormer2Adapter(paths, self.manager),
             MossFormerGANAdapter(paths, self.manager),
             FRCRNAdapter(paths, self.manager),
-            VoiceFixerAdapter(paths, self.manager),
             GTCRNAdapter(paths, self.manager),
         ):
             self._adapters[adapter.get_capabilities().model_id] = adapter
