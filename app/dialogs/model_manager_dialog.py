@@ -1,4 +1,4 @@
-"""Diálogo de gestión, verificación, consentimiento de descarga y licencias de modelos IA."""
+"""Diálogo de gestión, verificación, progreso de descarga y licencias de modelos IA."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -24,18 +25,20 @@ from core.paths import AppPaths
 
 
 class ModelManagerDialog(QDialog):
-    """Muestra estado real, licencias, requisitos y acciones de modelos IA."""
+    """Muestra estado real, licencias, requisitos, descarga con progreso y eliminación."""
 
     download_requested = Signal(str)
+    cancel_download_requested = Signal()
     delete_requested = Signal(str)
     refresh_requested = Signal()
 
     def __init__(self, paths: AppPaths, models: list[dict[str, Any]], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Gestor de Modelos IA — ZenTralAudio")
-        self.resize(900, 440)
+        self.resize(920, 470)
         self._paths = paths
         self._models = models
+        self._busy = False
 
         layout = QVBoxLayout(self)
         info = QLabel(
@@ -57,6 +60,20 @@ class ModelManagerDialog(QDialog):
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.itemSelectionChanged.connect(self._update_buttons)
         layout.addWidget(self._table, stretch=1)
+
+        prog_row = QHBoxLayout()
+        self._status_lbl = QLabel("Listo")
+        self._status_lbl.setObjectName("SecondaryText")
+        self._progress = QProgressBar()
+        self._progress.setVisible(False)
+        self._cancel_dl_btn = QPushButton("Cancelar descarga")
+        self._cancel_dl_btn.setObjectName("DangerButton")
+        self._cancel_dl_btn.setVisible(False)
+        self._cancel_dl_btn.clicked.connect(self.cancel_download_requested.emit)
+        prog_row.addWidget(self._status_lbl, stretch=1)
+        prog_row.addWidget(self._progress)
+        prog_row.addWidget(self._cancel_dl_btn)
+        layout.addLayout(prog_row)
 
         btn_row = QHBoxLayout()
         self._download_btn = QPushButton("Descargar / Instalar...")
@@ -98,6 +115,16 @@ class ModelManagerDialog(QDialog):
             self._table.setItem(row, 5, QTableWidgetItem(str(m.get("note", ""))))
         self._update_buttons()
 
+    def set_download_progress(self, busy: bool, message: str, fraction: float = 0.0) -> None:
+        self._busy = busy
+        self._status_lbl.setText(message)
+        self._progress.setVisible(busy)
+        self._cancel_dl_btn.setVisible(busy)
+        if busy:
+            self._progress.setRange(0, 100)
+            self._progress.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+        self._update_buttons()
+
     def _selected_model(self) -> dict[str, Any] | None:
         row = self._table.currentRow()
         if 0 <= row < len(self._models):
@@ -106,14 +133,17 @@ class ModelManagerDialog(QDialog):
 
     def _update_buttons(self) -> None:
         m = self._selected_model()
-        if m is None:
+        if m is None or self._busy:
             self._download_btn.setEnabled(False)
             self._delete_btn.setEnabled(False)
+            self._refresh_btn.setEnabled(not self._busy)
             return
+        self._refresh_btn.setEnabled(True)
         can_dl = bool(m.get("download_supported", False))
         installed = m.get("status_code") in ("installed", "available")
+        has_files = installed or m.get("status_code") in ("incompatible", "error")
         self._download_btn.setEnabled(can_dl and not installed)
-        self._delete_btn.setEnabled(installed)
+        self._delete_btn.setEnabled(has_files)
 
     def _on_download(self) -> None:
         m = self._selected_model()
