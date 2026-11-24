@@ -67,6 +67,7 @@ REQUIRED_MODULES = [
     "app.dialogs.export_dialog",
     "app.app_controller",
     "app.main_window",
+    "main",
 ]
 
 
