@@ -16,7 +16,7 @@ on:
       - "tests/test_model_registry.py"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-offline-ai:
@@ -73,8 +73,16 @@ jobs:
       - name: Verificar paquete Offline AI
         shell: pwsh
         run: |
-          if (!(Test-Path "dist/ZenTralAudio-Offline-AI.zip")) {
-            throw "Falta dist/ZenTralAudio-Offline-AI.zip"
+          $assets = @()
+          $zip = "dist/ZenTralAudio-Offline-AI.zip"
+          if (Test-Path $zip) { $assets += Get-Item $zip }
+          $parts = Get-ChildItem "dist/ZenTralAudio-Offline-AI.zip.part*" -ErrorAction SilentlyContinue
+          foreach ($part in $parts) { $assets += $part }
+          if ($assets.Count -eq 0) {
+            throw "No se encontró el ZIP ni las partes del paquete Offline AI."
+          }
+          if (!(Test-Path "dist/RELEASE_NOTES_OFFLINE_AI.md")) {
+            throw "Faltan las instrucciones de descarga y extracción."
           }
           if (!(Test-Path "dist/ZenTralAudio_Portable/ZenTralAudio.exe")) {
             throw "Falta el ejecutable principal."
@@ -82,12 +90,30 @@ jobs:
           if (!(Test-Path "dist/ZenTralAudio_Portable/runtimes/ZenTralModelWorker/ZenTralModelWorker.exe")) {
             throw "Falta el worker de inferencia offline."
           }
-          Get-Item "dist/ZenTralAudio-Offline-AI.zip"
+          $assets | Select-Object Name,Length
 
-      - name: Subir artefacto Offline AI
-        uses: actions/upload-artifact@v4
+      - name: Preparar lista de assets de GitHub Release
+        id: release_assets
+        shell: pwsh
+        run: |
+          $assets = @()
+          $zip = "dist/ZenTralAudio-Offline-AI.zip"
+          if (Test-Path $zip) { $assets += $zip }
+          $parts = Get-ChildItem "dist/ZenTralAudio-Offline-AI.zip.part*" -ErrorAction SilentlyContinue
+          foreach ($part in $parts) { $assets += $part.FullName }
+          if ($assets.Count -eq 0) { throw "No hay archivos para publicar." }
+          "files<<EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $assets | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Publicar ZenTralAudio Offline AI en GitHub Releases
+        uses: softprops/action-gh-release@v3
         with:
-          name: ZenTralAudio-Offline-AI
-          path: dist/ZenTralAudio-Offline-AI.zip
-          if-no-files-found: error
-          retention-days: 30
+          tag_name: offline-ai-${{ github.sha }}
+          target_commitish: ${{ github.sha }}
+          name: ZenTralAudio Offline AI
+          body_path: dist/RELEASE_NOTES_OFFLINE_AI.md
+          files: ${{ steps.release_assets.outputs.files }}
+          make_latest: true
+          overwrite_files: true
+          fail_on_unmatched_files: true

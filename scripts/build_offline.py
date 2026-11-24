@@ -198,6 +198,87 @@ def _create_portable_zip(portable_dir: Path, output_path: Path) -> None:
                 print(f"Empaquetando archivos: {index}/{total}", flush=True)
 
 
+
+def _split_release_asset_if_needed(output_path: Path, *, max_part_bytes: int = 1_800_000_000) -> list[Path]:
+    """Divide el ZIP en partes inferiores a 2 GB para subirlas como assets de GitHub Release."""
+    if output_path.stat().st_size <= max_part_bytes:
+        return [output_path]
+
+    parts: list[Path] = []
+    part_size = 0
+    part_path: Path | None = None
+    part_index = 0
+    with output_path.open("rb") as source:
+        while True:
+            chunk = source.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            if part_path is None or part_size + len(chunk) > max_part_bytes:
+                part_index += 1
+                part_size = 0
+                part_path = output_path.with_name(f"{output_path.name}.part{part_index:02d}")
+                part_path.unlink(missing_ok=True)
+                parts.append(part_path)
+            with part_path.open("ab") as target:
+                target.write(chunk)
+            part_size += len(chunk)
+
+    output_path.unlink()
+    print(
+        "ZIP dividido para publicación como Release: "
+        + ", ".join(f"{p.name} ({p.stat().st_size / (1024 * 1024):.1f} MB)" for p in parts),
+        flush=True,
+    )
+    return parts
+
+
+def _write_release_notes(dist_dir: Path, assets: list[Path]) -> Path:
+    """Prepara instrucciones de descarga, unión opcional de partes y extracción."""
+    notes = [
+        "# ZenTralAudio Offline AI — Windows x64",
+        "",
+        "Edición portable con cinco modelos: DeepFilterNet3, MossFormer2_SE_48K, "
+        "MossFormerGAN_SE_16K, FRCRN_SE_16K y VoiceFixer.",
+        "",
+        "## Instalación",
+        "",
+    ]
+    if len(assets) == 1 and assets[0].suffix.lower() == ".zip":
+        notes.extend([
+            "1. Descarga ZenTralAudio-Offline-AI.zip desde esta Release.",
+            "2. Extrae el ZIP completo en una carpeta local.",
+            "3. Abre ZenTralAudio_Portable y ejecuta ZenTralAudio.exe.",
+        ])
+    else:
+        names = [p.name for p in assets]
+        command = " + ".join(names) + " ZenTralAudio-Offline-AI.zip"
+        notes.extend([
+            "1. Descarga TODAS las partes adjuntas a esta Release en la misma carpeta.",
+            "2. Abre CMD en esa carpeta y ejecuta este comando para reconstruir el ZIP:",
+            "",
+            "    copy /b " + command,
+            "",
+            "3. Extrae ZenTralAudio-Offline-AI.zip.",
+            "4. Abre ZenTralAudio_Portable y ejecuta ZenTralAudio.exe.",
+        ])
+    notes.extend([
+        "",
+        "## Requisitos y notas",
+        "",
+        "- Windows 10/11 de 64 bits.",
+        "- Reserva al menos 5 GB libres para extraer y trabajar con la carpeta portable.",
+        "- Conserva juntas las carpetas _internal, models_data, runtimes, bin y el ejecutable.",
+        "- Esta edición se construye para CPU; CUDA requiere runtimes compatibles.",
+        "- GTCRN no está incluido porque sus pesos y runtime todavía no están verificados.",
+        "- Consulta LICENSES_AI.md para licencias y atribuciones, incluida CC-BY-4.0 para VoiceFixer.",
+        "",
+        "La comprobación automática valida los pesos, las importaciones del runtime IA y el arranque portable desde otra ruta.",
+    ])
+    release_notes = dist_dir / "RELEASE_NOTES_OFFLINE_AI.md"
+    release_notes.write_text("\n".join(notes) + "\n", encoding="utf-8")
+    return release_notes
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Construye la edición ZenTralAudio Offline AI.")
     parser.add_argument("--bundle-ffmpeg", action="store_true")
@@ -246,8 +327,11 @@ def main() -> int:
     (dist_dir / "ZenTralAudio-Windows-Portable.zip").unlink(missing_ok=True)
     output_path = dist_dir / "ZenTralAudio-Offline-AI.zip"
     _create_portable_zip(portable_dir, output_path)
-    print(f"Paquete Offline AI generado: {output_path}", flush=True)
-    print(f"Tamaño: {output_path.stat().st_size / (1024 * 1024):.1f} MB", flush=True)
+    assets = _split_release_asset_if_needed(output_path)
+    _write_release_notes(dist_dir, assets)
+    for asset in assets:
+        print(f"Asset Offline AI preparado: {asset.name} ({asset.stat().st_size / (1024 * 1024):.1f} MB)", flush=True)
+    print(f"Total publicado en {len(assets)} archivo(s).", flush=True)
     return 0
 
 
