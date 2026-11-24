@@ -24,7 +24,6 @@ def test_registry_lists_six_models_and_honest_uninstalled_status(portable_paths:
         "mossformer2_se_48k",
         "mossformergan_se_16k",
         "frcrn_se_16k",
-        "voicefixer",
         "gtcrn",
     }
 
