@@ -14,7 +14,6 @@ from models.gtcrn_adapter import GTCRNAdapter
 from models.model_manager import ModelManager
 from models.mossformer2_adapter import MossFormer2Adapter
 from models.mossformergan_adapter import MossFormerGANAdapter
-from models.voicefixer_adapter import VoiceFixerAdapter
 
 
 class ModelRegistry:
