@@ -1,43 +1,55 @@
 # ZenTralAudio
 
-**ZenTralAudio** es una aplicación profesional de escritorio para Windows orientada a la restauración, mejora y contextualización acústica de grabaciones de voz mediante inteligencia artificial y procesamiento digital de señales (DSP).
-
-> Estado actual: **Fase 2 — Base del proyecto** (arquitectura núcleo, rutas portables, configuración, logging, validación y gestor de tareas asíncronas).
+**ZenTralAudio** es una aplicación profesional de escritorio para Windows (portable) diseñada para restaurar, mejorar y contextualizar grabaciones de voz mediante inteligencia artificial y procesamiento digital de señales (DSP).
 
 ---
 
-## Características previstas en la arquitectura
+## Características principales
 
-1. **Restauración IA y DSP**:
-   - Adaptadores modulares para modelos de restauración vocal (`MossFormer2_SE_48K`, `MossFormerGAN_SE_16K`, `FRCRN_SE_16K`, `DeepFilterNet3`, `VoiceFixer`, `GTCRN`) según disponibilidad y verificación técnica de cada implementación.
-   - Presets profesionales adaptativos y control real de intensidad (0–100 %).
-   - Opciones avanzadas generadas dinámicamente según las capacidades reales del modelo y los módulos DSP activos.
-2. **Ambientes Acústicos**:
-   - Simulación mediante convolución de Respuestas Impulsionales (IR) y reverberación algorítmica paramétrica.
-   - Mezclador multicapa de ambientes con gestión transparente de licencias y recursos locales/descargables bajo consentimiento.
-3. **Previsualización y Exportación coherentes**:
-   - Reproductor permanente inferior con comparación instantánea `ON/OFF` (Original/Procesado) y `A/B`.
-   - Cadena de procesamiento compartida para asegurar que el audio exportado (`WAV`, `FLAC`, `MP3`) coincida con la previsualización.
-4. **Distribución Portable para Windows**:
-   - Empaquetado mediante PyInstaller (`--onedir`) sin instalador tradicional ni dependencias de rutas absolutas.
+1. **Pestaña 1 — RESTAURACIÓN IA**:
+   - Carga por explorador o *drag & drop* (`WAV`, `FLAC`, `AIFF`, `OGG`, y `MP3`/`M4A`/`AAC` mediante `FFmpeg`).
+   - Visualización de forma de onda interactiva (cursor y selección de fragmento) y espectrograma STFT real en dBFS.
+   - Adaptadores modulares para modelos IA de restauración vocal con verificación explícita de estado, licencias y descargas bajo consentimiento.
+   - 9 presets profesionales adaptativos (`Studio Voice`, `Podcast Pro`, `Noise Removal`, `Heavy Noise`, `Echo Removal`, `Old Recording`, `Telephone Voice`, `Natural Voice`, `Maximum Recovery`) + guardado de presets personalizados.
+   - Control real de intensidad (0–100 %) mediante mezcla *dry/wet* alineada y parámetros nativos.
+   - Panel **OPCIONES AVANZADAS** generado dinámicamente según las capacidades reales del modelo y los módulos DSP implementados (`Reducción de ruido`, `Ecualización`, `Dinámica`, `Tratamiento vocal`, `Tratamiento espacial`).
 
----
+2. **Pestaña 2 — AMBIENTES ACÚSTICOS**:
+   - 14 entornos configurados (`Bosque`, `Playa`, `Calle`, `WC o baño`, `Oficina`, `Restaurante`, `Habitación`, `Montaña`, `Estación`, `Cafetería`, `Iglesia`, `Pasillo`, `Exterior urbano`, `Estudio de grabación`).
+   - Simulación acústica mediante convolución de Respuestas Impulsionales (IR) reales o motor algorítmico paramétrico explícito.
+   - Mezclador multicapa con activación independiente, volumen, panorámica, `Solo`, carga de archivos locales y gestor transparente de licencias y recursos.
 
-## Requisitos del entorno de desarrollo
-
-- **Sistema operativo**: Windows 10 / 11 (64-bit).
-- **Python**: **3.11.x** (obligatorio por compatibilidad de wheels de audio e inferencia).
-- **FFmpeg** (opcional en esta fase, necesario para MP3/M4A/AAC): ejecutable `ffmpeg.exe` en `bin/` o en el `PATH` del sistema.
+3. **Reproductor Permanente y Exportación Coherente**:
+   - Transporte completo (`Play`, `Pause`, `Stop`, barra de tiempo, `Loop`, fragmento, medidor RMS/pico).
+   - Comparación instantánea **PROCESADO ON / OFF** (Original vs Procesado) con *crossfade* suave y compensación opcional de sonoridad, además de comparación **A / B**.
+   - **Paridad garantizada**: previsualización y exportación (`WAV`, `FLAC`, `MP3`) utilizan exactamente la misma instancia `ProcessingPipeline` y configuración serializable.
 
 ---
 
-## Instalación en desarrollo
+## Estado real y verificación de modelos IA
+
+ZenTralAudio **no simula operaciones de IA** ni inventa pesos o parámetros:
+
+| Modelo | Frecuencia | Licencia (Código / Pesos) | Estado y Notas |
+| :--- | :--- | :--- | :--- |
+| **DeepFilterNet3** | 48.000 Hz | MIT / Apache-2.0 | Fuente, ZIP fijado y SHA-256 oficial verificados. Requiere `deepfilternet==0.5.6` (`numpy<2.0`). |
+| **MossFormer2_SE_48K** | 48.000 Hz | Apache-2.0 / Apache-2.0 | Checkpoint `last_best_checkpoint.pt` y SHA-256 oficial verificados. Segmentación solapada integrada; requiere `clearvoice` o entorno aislado `.venv`. |
+| **MossFormerGAN_SE_16K** | 16.000 Hz | Apache-2.0 / Apache-2.0 | Fuente verificada (techo físico 8 kHz; sin SHA-256 oficial publicado en origen). Requiere `clearvoice` o `.venv` aislado. |
+| **FRCRN_SE_16K** | 16.000 Hz | Apache-2.0 / Apache-2.0 | Fuente verificada (techo físico 8 kHz; sin SHA-256 oficial publicado en origen). Requiere `clearvoice` o `.venv` aislado. |
+| **VoiceFixer** | 44.100 Hz | MIT / **CC-BY-4.0** (Zenodo 5600188) | Ambos checkpoints y SHA-256 oficiales verificados. Requiere atribución CC-BY-4.0; recomendado en `.venv` aislado. |
+| **GTCRN** | 16.000 Hz | MIT | Marcado explícitamente como **Incompatible / Pendiente de verificación** hasta confirmar nombres de checkpoints y paquete Python oficial en `Xiaobin-Rong/gtcrn`. |
+
+La aplicación arranca y funciona completamente desde el primer momento con la cadena DSP y simulación acústica incluso sin haber descargado modelos IA.
+
+---
+
+## Instalación en desarrollo (Windows / Python 3.11)
 
 ```bash
 git clone https://github.com/TU_USUARIO/ZenTralAudio.git
 cd ZenTralAudio
 
-python -m venv .venv
+py -3.11 -m venv .venv
 .venv\Scripts\activate
 
 python -m pip install --upgrade pip
