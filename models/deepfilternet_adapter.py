@@ -52,16 +52,22 @@ class _PythonLoggingStderr:
 
 def _call_with_safe_stderr(function: Any, *args: Any, **kwargs: Any) -> Any:
     """Ejecuta una inicialización de terceros aunque el EXE no tenga consola."""
+    previous_stdout = sys.stdout
     previous_stderr = sys.stderr
-    if previous_stderr is not None:
+    if previous_stdout is not None and previous_stderr is not None:
         return function(*args, **kwargs)
 
-    safe_stderr = _PythonLoggingStderr()
-    sys.stderr = safe_stderr
+    safe_stream = _PythonLoggingStderr()
+    if previous_stdout is None:
+        sys.stdout = safe_stream
+    if previous_stderr is None:
+        sys.stderr = safe_stream
     try:
         return function(*args, **kwargs)
     finally:
-        if sys.stderr is safe_stderr:
+        if sys.stdout is safe_stream:
+            sys.stdout = previous_stdout
+        if sys.stderr is safe_stream:
             sys.stderr = previous_stderr
 
 

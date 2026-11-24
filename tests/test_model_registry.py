@@ -62,7 +62,7 @@ def test_sha256_and_zipslip_protection(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_deepfilternet_initialization_has_safe_stderr_without_console(
+def test_deepfilternet_initialization_has_safe_stdout_and_stderr_without_console(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -71,15 +71,20 @@ def test_deepfilternet_initialization_has_safe_stderr_without_console(
 
     from models.deepfilternet_adapter import _call_with_safe_stderr
 
+    monkeypatch.setattr(sys, "stdout", None)
     monkeypatch.setattr(sys, "stderr", None)
 
     def fake_library_initializer() -> str:
+        assert sys.stdout is not None
         assert sys.stderr is not None
-        sys.stderr.write("DeepFilterNet runtime initialized\n")
+        sys.stdout.write("DeepFilterNet stdout initialized\\n")
+        sys.stderr.write("DeepFilterNet stderr initialized\\n")
         return "ready"
 
     with caplog.at_level(logging.INFO, logger="zentralaudio.models.deepfilternet3"):
         assert _call_with_safe_stderr(fake_library_initializer) == "ready"
 
+    assert sys.stdout is None
     assert sys.stderr is None
-    assert "DeepFilterNet: DeepFilterNet runtime initialized" in caplog.text
+    assert "DeepFilterNet: DeepFilterNet stdout initialized" in caplog.text
+    assert "DeepFilterNet: DeepFilterNet stderr initialized" in caplog.text
