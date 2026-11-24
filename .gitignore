@@ -1,0 +1,68 @@
+# Byte-compiled / Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+*.spec.bak
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing & linters
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ZenTralAudio runtime & portable user data (never commit weights, audio, logs or caches)
+models_data/*
+!models_data/.gitkeep
+ambience_data/*
+!ambience_data/.gitkeep
+cache/*
+!cache/.gitkeep
+exports/*
+!exports/.gitkeep
+config/*
+!config/.gitkeep
+logs/*
+!logs/.gitkeep
+projects/*
+!projects/.gitkeep
+presets/custom/*
+!presets/custom/.gitkeep
+
+# Large model weights & media accidentally placed in root
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.aac
+*.ogg
+*.zip
+*.tar.gz
+*.7z
+
+# External portable binaries
+bin/
+ffmpeg.exe
+ffprobe.exe
