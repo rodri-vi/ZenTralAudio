@@ -41,7 +41,9 @@ def _run(cmd: list[str], cwd: Path, *, capture: bool = False) -> None:
             errors="replace",
         )
         if proc.stdout:
-            print(proc.stdout)
+            # Escape cualquier carácter que la consola Windows cp1252 no pueda mostrar.
+            safe_output = proc.stdout.encode("ascii", errors="backslashreplace").decode("ascii")
+            print(safe_output)
     else:
         proc = subprocess.run(cmd, cwd=str(cwd))
 
