@@ -22,10 +22,24 @@ from models.model_manager import ModelManager, compute_sha256
 MODEL_ID = "deepfilternet3"
 
 
-def _run(command: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None) -> None:
+def _run(
+    command: list[str],
+    *,
+    cwd: Path = ROOT,
+    env: dict[str, str] | None = None,
+    failure_log: Path | None = None,
+) -> None:
     print("Ejecutando:", " ".join(command), flush=True)
     proc = subprocess.run(command, cwd=str(cwd), env=env)
     if proc.returncode:
+        if failure_log is not None and failure_log.is_file():
+            print("\n===== REGISTRO DEL EJECUTABLE (últimas 160 líneas) =====", flush=True)
+            try:
+                lines = failure_log.read_text(encoding="utf-8", errors="replace").splitlines()
+                print("\\n".join(lines[-160:]), flush=True)
+            except OSError as exc:
+                print(f"No se pudo leer el registro: {exc}", flush=True)
+            print("===== FIN DEL REGISTRO =====\\n", flush=True)
         raise RuntimeError(f"El comando terminó con código {proc.returncode}: {' '.join(command)}")
 
 
@@ -143,6 +157,7 @@ def main() -> int:
         [str(exe), "--smoke-test-model", MODEL_ID],
         cwd=portable_dir,
         env=env,
+        failure_log=portable_dir / "logs" / "zentralaudio.log",
     )
 
     output_path = dist_dir / "ZenTralAudio-Offline-AI-Partial.zip"
