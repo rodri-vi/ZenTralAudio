@@ -87,4 +87,17 @@ class PipelineConfig:
     def ai_stage_cache_key(self, source_hash: str) -> str:
         """Clave de caché exclusiva para la salida cruda del modelo IA."""
         model_specific = {
-            k: v for k, v in self.advanced_params.items() if str(k).st
+            k: v for k, v in self.advanced_params.items() if str(k).startswith("model_")
+        }
+        payload = {
+            "source_hash": source_hash,
+            "model_id": self.model_id,
+            "ai_enabled": self.ai_enabled,
+            "model_params": model_specific,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def full_cache_key(self, source_hash: str) -> str:
+        """Clave de caché completa de toda la cadena de procesamiento."""
+        payload = {"source_hash": source_hash, "config": self.to_dict()}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
