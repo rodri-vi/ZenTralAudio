@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "notice": "ZenTralAudio no incluye grabaciones protegidas ni genera ruido aleatorio haciéndolo pasar por entornos reales. Puedes asignar tus propios archivos locales o configurar URLs verificadas CC0/CC-BY.",
+  "resources": [
+    {
+      "id": "amb_bosque_pajaros",
+      "environment_id": "bosque",
+      "name": "Pájaros en bosque",
+      "filename": "bosque_pajaros.wav",
+      "source": "Catálogo local / Freesound CC0 (asignable por el usuario)",
+      "author": "Pendiente de archivo del usuario o fuente CC0",
+      "license": "CC0-1.0 / Uso local del usuario",
+      "source_url": "https://freesound.org/",
+      "download_url": null,
+      "sha256": null,
+      "restrictions": "Coloca 'bosque_pajaros.wav' en ambience_data/bosque/ o asígnalo con 'Archivo...' en la pestaña Ambientes."
+    },
+    {
+      "id": "amb_bosque_viento",
+      "environment_id": "bosque",
+      "name": "Viento entre árboles",
+      "filename": "bosque_viento.wav",
+      "source": "Catálogo local / Freesound CC0 (asignable por el usuario)",
+      "author": "Pendiente de archivo del usuario o fuente CC0",
+      "license": "CC0-1.0 / Uso local del usuario",
+      "source_url": "https://freesound.org/",
+      "download_url": null,
+      "sha256": null,
+      "restrictions": "Coloca 'bosque_viento.wav' en ambience_data/bosque/ o asígnalo con 'Archivo...'."
+    },
+    {
+      "id": "amb_playa_olas",
+      "environment_id": "playa",
+      "name": "Olas en la orilla",
+      "filename": "playa_olas.wav",
+      "source": "Catálogo local / Freesound CC0 (asignable por el usuario)",
+      "author": "Pendiente de archivo del usuario o fuente CC0",
+      "license": "CC0-1.0 / Uso local del usuario",
+      "source_url": "https://freesound.org/",
+      "download_url": null,
+      "sha256": null,
+      "restrictions": "Coloca 'playa_olas.wav' en ambience_data/playa/ o asígnalo con 'Archivo...'."
+    },
+    {
+      "id": "amb_calle_trafico",
+      "environment_id": "calle",
+      "name": "Tráfico urbano",
+      "filename": "calle_trafico.wav",
+      "source": "Catálogo local / Freesound CC0 (asignable por el usuario)",
+      "author": "Pendiente de archivo del usuario o fuente CC0",
+      "license": "CC0-1.0 / Uso local del usuario",
+      "source_url": "https://freesound.org/",
+      "download_url": null,
+      "sha256": null,
+      "restrictions": "Coloca 'calle_trafico.wav' en ambience_data/calle/ o asígnalo con 'Archivo...'."
+    },
+    {
+      "id": "amb_oficina_teclados",
+      "environment_id": "oficina",
+      "name": "Teclados y actividad de oficina",
+      "filename": "oficina_teclados.wav",
+      "source": "Catálogo local / Freesound CC0 (asignable por el usuario)",
+      "author": "Pendiente de archivo del usuario o fuente CC0",
+      "license": "CC0-1.0 / Uso local del usuario",
+      "source_url": "https://freesound.org/",
+      "download_url": null,
+      "sha256": null,
+      "restrictions": "Coloca 'oficina_teclados.wav' en ambience_data/oficina/ o asígnalo con 'Archivo...'."
+    },
+    {
+      "id": "amb_restaurante_murmullo",
+      "environment_id": "restaurante",
+      "name": "Murmullo de restaurante",
+      "filename": "restaurante_murmullo.wav",
+      "source": "Catálogo local / Freesound CC0 (asignable por el usuario)",
+      "author": "Pendiente de archivo del usuario o fuente CC0",
+      "license": "CC0-1.0 / Uso local del usuario",
+      "source_url": "https://freesound.org/",
+      "download_url": null,
+      "sha256": null,
+      "restrictions": "Coloca 'restaurante_murmullo.wav' en ambience_data/restaurante/ o asígnalo con 'Archivo...'."
+    }
+  ]
+}
