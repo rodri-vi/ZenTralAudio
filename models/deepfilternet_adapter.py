@@ -22,6 +22,49 @@ from models.model_manager import ModelManager
 logger = logging.getLogger("zentralaudio.models.deepfilternet3")
 
 
+class _PythonLoggingStderr:
+    """Sink compatible con stderr que reenvía los mensajes al log portable."""
+
+    encoding = "utf-8"
+    errors = "replace"
+
+    def write(self, message: str) -> int:
+        text = str(message)
+        for line in text.splitlines():
+            if line.strip():
+                logger.info("DeepFilterNet: %s", line.rstrip())
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        # Loguru puede conservar este stream después de restaurar sys.stderr.
+        # No se cierra porque el adaptador y sus sinks comparten su ciclo de vida.
+        return None
+
+
+def _call_with_safe_stderr(function: Any, *args: Any, **kwargs: Any) -> Any:
+    """Ejecuta una inicialización de terceros aunque el EXE no tenga consola."""
+    previous_stderr = sys.stderr
+    if previous_stderr is not None:
+        return function(*args, **kwargs)
+
+    safe_stderr = _PythonLoggingStderr()
+    sys.stderr = safe_stderr
+    try:
+        return function(*args, **kwargs)
+    finally:
+        if sys.stderr is safe_stderr:
+            sys.stderr = previous_stderr
+
+
 def _ensure_torchaudio_compat_shim() -> None:
     """Proporciona shim seguro si torchaudio eliminó torchaudio.backend.common."""
     import torchaudio
@@ -164,7 +207,11 @@ class DeepFilterNet3Adapter(BaseModelAdapter):
 
         self.unload_model()
         try:
-            model, df_state, _ = init_df(model_base_dir=str(weights_dir), post_filter=bool(post_filter))
+            model, df_state, _ = _call_with_safe_stderr(
+                init_df,
+                model_base_dir=str(weights_dir),
+                post_filter=bool(post_filter),
+            )
             model = model.to(target_dev)
             model.eval()
             self._model = model

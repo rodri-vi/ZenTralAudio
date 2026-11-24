@@ -59,3 +59,27 @@ def test_sha256_and_zipslip_protection(tmp_path: Path) -> None:
     dest.mkdir()
     with pytest.raises(IntegrityCheckError):
         _safe_extract_zip(bad_zip, dest)
+
+
+@pytest.mark.unit
+def test_deepfilternet_initialization_has_safe_stderr_without_console(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+    import sys
+
+    from models.deepfilternet_adapter import _call_with_safe_stderr
+
+    monkeypatch.setattr(sys, "stderr", None)
+
+    def fake_library_initializer() -> str:
+        assert sys.stderr is not None
+        sys.stderr.write("DeepFilterNet runtime initialized\n")
+        return "ready"
+
+    with caplog.at_level(logging.INFO, logger="zentralaudio.models.deepfilternet3"):
+        assert _call_with_safe_stderr(fake_library_initializer) == "ready"
+
+    assert sys.stderr is None
+    assert "DeepFilterNet: DeepFilterNet runtime initialized" in caplog.text
