@@ -40,7 +40,7 @@ REQUIRED_MODULES = [
     "models.mossformer2_adapter",
     "models.mossformergan_adapter",
     "models.frcrn_adapter",
-    "models.voicefixer_adapter",
+    "models.isolated_runners.voicefixer_adapter",
     "models.gtcrn_adapter",
     "models.model_registry",
     "models.isolated_runners.runner_protocol",

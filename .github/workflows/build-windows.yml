@@ -39,9 +39,12 @@ jobs:
           & "$realBin\ffmpeg.exe" -version
 
       - name: Comprobar entorno e importación de todos los módulos
+        shell: pwsh
         run: |
           python scripts/check_environment.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/verify_resources.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Ejecutar pruebas automatizadas (unit e integration)
         env:
