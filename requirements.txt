@@ -1,0 +1,23 @@
+# ZenTralAudio - Dependencias núcleo para Python 3.11 (Windows x64)
+# Fijadas para garantizar compatibilidad cruzada entre PySide6, PyTorch y adaptadores de audio.
+
+# Interfaz gráfica
+PySide6>=6.7.2,<6.9.0
+
+# Procesamiento numérico y DSP
+numpy==1.26.4
+scipy>=1.11.4,<1.15.0
+soundfile>=0.12.1,<0.14.0
+sounddevice>=0.5.1,<0.6.0
+soxr>=0.3.7,<0.6.0
+librosa>=0.10.2,<0.11.0
+
+# Motor de inferencia IA (CPU por defecto; compatible con torchaudio.backend en 2.5.1)
+# Nota: Para usar GPU NVIDIA localmente, instalar desde el índice CUDA oficial de PyTorch:
+# pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1
+torchaudio==2.5.1
+
+# Red y verificación de descargas
+requests>=2.32.2,<3.0.0
+huggingface-hub>=0.24.6,<0.29.0
