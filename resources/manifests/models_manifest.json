@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "model_id": "deepfilternet3",
+      "display_name": "DeepFilterNet3",
+      "required_sample_rate": 48000,
+      "license_code": "MIT / Apache-2.0",
+      "license_weights": "MIT / Apache-2.0 (distribuidos en Rikorose/DeepFilterNet)",
+      "attribution_required": false,
+      "source_url": "https://github.com/Rikorose/DeepFilterNet",
+      "download_supported": true,
+      "archive_type": "zip",
+      "files": [
+        {
+          "filename": "DeepFilterNet3.zip",
+          "url": "https://github.com/Rikorose/DeepFilterNet/raw/d375b2d8309e0935d165700c91da9de862a99c31/models/DeepFilterNet3.zip",
+          "sha256": "49c52edc8947ae1f9bf50d81530beaf3a2c3245aeaf34b6f31ff535cd22284d2",
+          "approx_size_mb": 8
+        }
+      ],
+      "runtime_requirement": "deepfilternet==0.5.6 (compatible con Python 3.11 Windows, numpy<2.0, torchaudio<=2.8)"
+    },
+    {
+      "model_id": "mossformer2_se_48k",
+      "display_name": "MossFormer2_SE_48K",
+      "required_sample_rate": 48000,
+      "license_code": "Apache-2.0",
+      "license_weights": "Apache-2.0",
+      "attribution_required": false,
+      "source_url": "https://huggingface.co/alibabasglab/MossFormer2_SE_48K",
+      "download_supported": true,
+      "archive_type": "none",
+      "files": [
+        {
+          "filename": "last_best_checkpoint.pt",
+          "url": "https://huggingface.co/alibabasglab/MossFormer2_SE_48K/resolve/main/last_best_checkpoint.pt",
+          "sha256": "03692b9f773bbd6bb43b9c5a41f96b1e28affd66e13796b7bec66ad3d8b227c6",
+          "approx_size_mb": 222
+        },
+        {
+          "filename": "last_best_checkpoint",
+          "url": "https://huggingface.co/alibabasglab/MossFormer2_SE_48K/resolve/main/last_best_checkpoint",
+          "sha256": null,
+          "approx_size_mb": 1
+        }
+      ],
+      "runtime_requirement": "clearvoice (o runner aislado en models_data/mossformer2_se_48k/.venv)"
+    },
+    {
+      "model_id": "mossformergan_se_16k",
+      "display_name": "MossFormerGAN_SE_16K",
+      "required_sample_rate": 16000,
+      "license_code": "Apache-2.0",
+      "license_weights": "Apache-2.0",
+      "attribution_required": false,
+      "source_url": "https://huggingface.co/alibabasglab/MossFormerGAN_SE_16K",
+      "download_supported": true,
+      "archive_type": "none",
+      "files": [
+        {
+          "filename": "last_best_checkpoint.pt",
+          "url": "https://huggingface.co/alibabasglab/MossFormerGAN_SE_16K/resolve/main/last_best_checkpoint.pt",
+          "sha256": null,
+          "approx_size_mb": 120
+        },
+        {
+          "filename": "last_best_checkpoint.disc.pt",
+          "url": "https://huggingface.co/alibabasglab/MossFormerGAN_SE_16K/resolve/main/last_best_checkpoint.disc.pt",
+          "sha256": null,
+          "approx_size_mb": 16
+        },
+        {
+          "filename": "last_best_checkpoint",
+          "url": "https://huggingface.co/alibabasglab/MossFormerGAN_SE_16K/resolve/main/last_best_checkpoint",
+          "sha256": null,
+          "approx_size_mb": 1
+        }
+      ],
+      "runtime_requirement": "clearvoice (o runner aislado). Limitación: 16 kHz (techo de 8 kHz)."
+    },
+    {
+      "model_id": "frcrn_se_16k",
+      "display_name": "FRCRN_SE_16K",
+      "required_sample_rate": 16000,
+      "license_code": "Apache-2.0",
+      "license_weights": "Apache-2.0",
+      "attribution_required": false,
+      "source_url": "https://huggingface.co/alibabasglab/FRCRN_SE_16K",
+      "download_supported": true,
+      "archive_type": "none",
+      "files": [
+        {
+          "filename": "last_best_checkpoint.pt",
+          "url": "https://huggingface.co/alibabasglab/FRCRN_SE_16K/resolve/main/last_best_checkpoint.pt",
+          "sha256": null,
+          "approx_size_mb": 161
+        },
+        {
+          "filename": "last_best_checkpoint",
+          "url": "https://huggingface.co/alibabasglab/FRCRN_SE_16K/resolve/main/last_best_checkpoint",
+          "sha256": null,
+          "approx_size_mb": 1
+        }
+      ],
+      "runtime_requirement": "clearvoice (o runner aislado). Limitación: 16 kHz (techo de 8 kHz)."
+    },
+    {
+      "model_id": "voicefixer",
+      "display_name": "VoiceFixer",
+      "required_sample_rate": 44100,
+      "license_code": "MIT",
+      "license_weights": "CC-BY-4.0 (Zenodo 5600188 - requiere atribución a Haohe Liu et al.)",
+      "attribution_required": true,
+      "source_url": "https://github.com/haoheliu/voicefixer",
+      "download_supported": true,
+      "archive_type": "none",
+      "files": [
+        {
+          "filename": "vf.ckpt",
+          "url": "https://zenodo.org/records/5600188/files/vf.ckpt?download=1",
+          "sha256": "748411b70089cadf34a6c11054f95f3a454e614af562c23b13a82f6cb413109f",
+          "approx_size_mb": 467
+        },
+        {
+          "filename": "model.ckpt-1490000_trimed.pt",
+          "url": "https://zenodo.org/records/5600188/files/model.ckpt-1490000_trimed.pt?download=1",
+          "sha256": "9410d0b528c10a251ae947bd299d1939b0b3247df680c81c4164e94f5d87dc45",
+          "approx_size_mb": 130
+        }
+      ],
+      "runtime_requirement": "voicefixer (recomendado en runner aislado por requisitos antiguos de librosa/torchlibrosa)."
+    },
+    {
+      "model_id": "gtcrn",
+      "display_name": "GTCRN",
+      "required_sample_rate": 16000,
+      "license_code": "MIT",
+      "license_weights": "No verificada / Sin descarga automatizada verificable en este manifiesto",
+      "attribution_required": true,
+      "source_url": "https://github.com/Xiaobin-Rong/gtcrn",
+      "download_supported": false,
+      "archive_type": "none",
+      "files": [],
+      "runtime_requirement": "Pendiente de verificación de nombres exactos de checkpoints en Xiaobin-Rong/gtcrn/checkpoints/ y paquete Python oficial."
+    }
+  ]
+}
