@@ -1,0 +1,7 @@
+# Dependencias adicionales de compilación para ZenTralAudio Offline AI.
+# Torch/Torchaudio están fijados en requirements-dev.txt (2.5.1).
+# Torchvision 0.20.1 corresponde a Torch 2.5.1.
+torchvision==0.20.1
+deepfilternet==0.5.6
+clearvoice==0.1.2
+voicefixer==0.1.3

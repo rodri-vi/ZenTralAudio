@@ -1,0 +1,93 @@
+name: Build Windows Offline AI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-windows-offline.yml"
+      - "requirements-offline-build.txt"
+      - "scripts/build_offline.py"
+      - "scripts/build_windows.py"
+      - "main.py"
+      - "packaging/ZenTralAudio.spec"
+      - "models/**"
+      - "resources/manifests/models_manifest.json"
+      - "tests/test_model_registry.py"
+
+permissions:
+  contents: read
+
+jobs:
+  build-offline-ai:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias base
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Instalar runtimes IA fijados para Offline AI
+        run: |
+          pip install -r requirements-offline-build.txt
+          python -c "import torch, torchaudio, torchvision, clearvoice, voicefixer, df; print('torch', torch.__version__); print('torchaudio', torchaudio.__version__); print('torchvision', torchvision.__version__)"
+
+      - name: Instalar FFmpeg real y añadirlo al PATH
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          $realBin = Get-ChildItem -Path "$env:ChocolateyInstall\lib\ffmpeg" -Recurse -Filter "ffmpeg.exe" | Where-Object { $_.Length -gt 1000000 } | Select-Object -First 1 -ExpandProperty DirectoryName
+          if (-not $realBin) {
+            throw "No se encontró el binario real de ffmpeg.exe."
+          }
+          "$realBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$realBin\ffmpeg.exe" -version
+
+      - name: Comprobar entorno y recursos
+        shell: pwsh
+        run: |
+          python scripts/check_environment.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/verify_resources.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Ejecutar pruebas automatizadas
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -v -m "unit or integration"
+
+      - name: Descargar pesos y construir ZenTralAudio Offline AI
+        run: python scripts/build_offline.py --bundle-ffmpeg
+
+      - name: Verificar paquete Offline AI
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/ZenTralAudio-Offline-AI.zip")) {
+            throw "Falta dist/ZenTralAudio-Offline-AI.zip"
+          }
+          if (!(Test-Path "dist/ZenTralAudio_Portable/ZenTralAudio.exe")) {
+            throw "Falta el ejecutable principal."
+          }
+          if (!(Test-Path "dist/ZenTralAudio_Portable/runtimes/ZenTralModelWorker/ZenTralModelWorker.exe")) {
+            throw "Falta el worker de inferencia offline."
+          }
+          Get-Item "dist/ZenTralAudio-Offline-AI.zip"
+
+      - name: Subir artefacto Offline AI
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZenTralAudio-Offline-AI
+          path: dist/ZenTralAudio-Offline-AI.zip
+          if-no-files-found: error
+          retention-days: 30
