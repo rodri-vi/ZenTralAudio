@@ -12,6 +12,7 @@ license = { text = "MIT" }
 
 [tool.pytest.ini_options]
 minversion = "8.0"
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-ra -q"
