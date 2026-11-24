@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "notice": "Respuestas impulsionales (IR) reales documentadas. Cuando no haya archivo IR local cargado, el motor usa simulación acústica algorítmica paramétrica explícita.",
+  "impulse_responses": [
+    {
+      "id": "ir_openair_iglesia",
+      "environment_id": "iglesia",
+      "name": "Iglesia / Catedral (OpenAIR)",
+      "filename": "iglesia_openair.wav",
+      "source": "OpenAIR - AudioLab, University of York",
+      "author": "OpenAIR Contributors",
+      "license": "CC-BY-4.0 (requiere atribución según ficha OpenAIR)",
+      "source_url": "https://www.openair.hosted.york.ac.uk/",
+      "download_url": null,
+      "sha256": null,
+      "restrictions": "Descarga manual desde OpenAIR o carga cualquier IR WAV/FLAC propia con 'Cargar IR local...'."
+    },
+    {
+      "id": "ir_openair_pasillo",
+      "environment_id": "pasillo",
+      "name": "Pasillo reflectante (OpenAIR)",
+      "filename": "pasillo_openair.wav",
+      "source": "OpenAIR - AudioLab, University of York",
+      "author": "OpenAIR Contributors",
+      "license": "CC-BY-4.0 / CC0 (según ficha OpenAIR)",
+      "source_url": "https://www.openair.hosted.york.ac.uk/",
+      "download_url": null,
+      "sha256": null,
+      "restrictions": "Descarga manual desde OpenAIR o carga cualquier IR WAV/FLAC propia con 'Cargar IR local...'."
+    },
+    {
+      "id": "ir_habitacion_local",
+      "environment_id": "habitacion",
+      "name": "Habitación estándar (IR local)",
+      "filename": "habitacion_ir.wav",
+      "source": "Archivo IR del usuario o OpenAIR",
+      "author": "Usuario / OpenAIR",
+      "license": "CC-BY-4.0 / Local",
+      "source_url": "https://www.openair.hosted.york.ac.uk/",
+      "download_url": null,
+      "sha256": null,
+      "restrictions": "Sin archivo descargado se aplica automáticamente la simulación algorítmica de habitación."
+    }
+  ]
+}
