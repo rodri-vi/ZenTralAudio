@@ -1,7 +1,3 @@
----
-
-`core/__init__.py`
-```python
 """Núcleo de infraestructura de ZenTralAudio."""
 
 from core.configuration import AppSettings, ConfigManager
