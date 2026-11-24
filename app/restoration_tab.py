@@ -45,7 +45,6 @@ class RestorationTab(QWidget):
         root.setContentsMargins(12, 10, 12, 10)
         root.setSpacing(10)
 
-        # 1. Carga y visualización del audio
         file_group = QGroupBox("1. Grabación de Entrada")
         file_layout = QVBoxLayout(file_group)
         file_layout.setSpacing(8)
@@ -103,7 +102,6 @@ class RestorationTab(QWidget):
 
         root.addWidget(file_group, stretch=2)
 
-        # 2. Modelo IA, Presets e Intensidad
         controls_frame = QFrame()
         controls_frame.setObjectName("PanelPrimary")
         controls_layout = QVBoxLayout(controls_frame)
@@ -158,6 +156,12 @@ class RestorationTab(QWidget):
         preset_row.addWidget(self._del_preset_btn)
         controls_layout.addLayout(preset_row)
 
+        self._preset_note_lbl = QLabel("")
+        self._preset_note_lbl.setStyleSheet(f"color: {Palette.WARNING}; font-size: 12px;")
+        self._preset_note_lbl.setWordWrap(True)
+        self._preset_note_lbl.setVisible(False)
+        controls_layout.addWidget(self._preset_note_lbl)
+
         intensity_row = QHBoxLayout()
         int_lbl = QLabel("Intensidad:")
         int_lbl.setFixedWidth(95)
@@ -189,7 +193,6 @@ class RestorationTab(QWidget):
 
         root.addWidget(controls_frame)
 
-        # 3. Panel colapsable de Opciones Avanzadas
         self.advanced_panel = DynamicParamPanel()
         self.advanced_panel.setVisible(False)
         self.advanced_panel.parameter_changed.connect(self.advanced_param_changed.emit)
@@ -224,6 +227,11 @@ class RestorationTab(QWidget):
                     break
         self._preset_combo.blockSignals(False)
         self._update_delete_preset_state()
+
+    def set_preset_notes(self, notes: list[str]) -> None:
+        text = " | ".join(notes).strip()
+        self._preset_note_lbl.setText(text)
+        self._preset_note_lbl.setVisible(bool(text))
 
     def set_metadata(
         self,
