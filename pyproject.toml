@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ZenTralAudio"
+version = "0.1.0"
+description = "Aplicación profesional portable de restauración de voz con IA y simulación de ambientes acústicos."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "MIT" }
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -q"
+markers = [
+    "unit: pruebas unitarias rápidas sin red ni pesos reales",
+    "integration: pruebas de integración del motor o FFmpeg",
+    "real_models: pruebas que requieren pesos de modelos IA descargados",
+    "gpu: pruebas opcionales que requieren GPU CUDA compatible",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["E501"]
