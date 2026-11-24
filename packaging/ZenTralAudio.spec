@@ -2,6 +2,7 @@
 """Especificación PyInstaller --onedir para generar la versión portable de ZenTralAudio."""
 
 from pathlib import Path
+import importlib.util
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parent
@@ -34,6 +35,13 @@ hiddenimports += collect_submodules("presets")
 hiddenimports += collect_submodules("app")
 hiddenimports += collect_submodules("scipy.signal")
 hiddenimports += collect_submodules("scipy.ndimage")
+
+# DeepFilterNet se instala solo en el entorno de compilación de Offline AI.
+# La edición ligera continúa siendo compilable sin el paquete opcional.
+if importlib.util.find_spec("df") is not None:
+    datas += collect_data_files("df")
+    hiddenimports += collect_submodules("df")
+    hiddenimports += ["libdf"]
 
 excludes = [
     "matplotlib",

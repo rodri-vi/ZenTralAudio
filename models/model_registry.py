@@ -14,6 +14,7 @@ from models.gtcrn_adapter import GTCRNAdapter
 from models.model_manager import ModelManager
 from models.mossformer2_adapter import MossFormer2Adapter
 from models.mossformergan_adapter import MossFormerGANAdapter
+from models.isolated_runners.voicefixer_adapter import VoiceFixerAdapter
 
 
 class ModelRegistry:
@@ -28,6 +29,7 @@ class ModelRegistry:
             MossFormer2Adapter(paths, self.manager),
             MossFormerGANAdapter(paths, self.manager),
             FRCRNAdapter(paths, self.manager),
+            VoiceFixerAdapter(paths, self.manager),
             GTCRNAdapter(paths, self.manager),
         ):
             self._adapters[adapter.get_capabilities().model_id] = adapter
