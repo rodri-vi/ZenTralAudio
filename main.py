@@ -50,12 +50,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Prepara rutas, logging y configuración y termina sin abrir la interfaz.",
     )
+    parser.add_argument(
+        "--check-offline",
+        action="store_true",
+        help="Comprueba que pesos y runtimes IA están incluidos y son portables.",
+    )
     args = parser.parse_args(argv)
 
     try:
         runtime_paths, config_manager = prepare_runtime()
         if args.check:
             logger.info("Modo --check completado correctamente.")
+            return 0
+        if args.check_offline:
+            from models.base_adapter import ModelStatus
+            from models.isolated_runners.subprocess_runner import find_bundled_worker
+            from models.model_registry import ModelRegistry
+
+            registry = ModelRegistry(runtime_paths)
+            expected_models = (
+                "deepfilternet3",
+                "mossformer2_se_48k",
+                "mossformergan_se_16k",
+                "frcrn_se_16k",
+                "voicefixer",
+            )
+            failures: list[str] = []
+            for model_id in expected_models:
+                adapter = registry.get_adapter(model_id)
+                if adapter is None:
+                    failures.append(f"{model_id}: adaptador no registrado")
+                    continue
+                status = adapter.get_status()
+                if status != ModelStatus.AVAILABLE:
+                    failures.append(f"{model_id}: {status.value} — {adapter.get_status_detail()}")
+                if model_id != "deepfilternet3" and find_bundled_worker(registry.manager.model_dir(model_id)) is None:
+                    failures.append(f"{model_id}: falta el worker portable de IA")
+            if failures:
+                for failure in failures:
+                    logger.error("Offline AI: %s", failure)
+                return 1
+            logger.info("Offline AI verificado: cinco modelos con pesos y runtimes locales.")
             return 0
 
         # Importar la UI después de atender --check mantiene el chequeo portable
