@@ -86,6 +86,11 @@ class AppPaths:
         bundled = bundle_root / relative
         if bundled.exists():
             return bundled
+        # En tests congelados simulados y herramientas de desarrollo, los datos
+        # inmutables pueden seguir en el checkout fuente aunque no exista _MEIPASS.
+        source_bundle = Path(__file__).resolve().parent.parent / relative
+        if source_bundle.exists():
+            return source_bundle
         return external
 
     def ensure_writable_directories(self) -> None:
@@ -117,7 +122,18 @@ class AppPaths:
         candidate_external = self.app_root.joinpath("resources", *parts)
         if candidate_external.exists():
             return candidate_external
-        return self.bundle_root.joinpath("resources", *parts)
+
+        candidate_bundle = self.bundle_root.joinpath("resources", *parts)
+        if candidate_bundle.exists():
+            return candidate_bundle
+
+        # Permite ejecutar pruebas con rutas portables simuladas sin copiar
+        # los recursos inmutables del checkout a cada directorio temporal.
+        candidate_source = Path(__file__).resolve().parent.parent.joinpath("resources", *parts)
+        if candidate_source.exists():
+            return candidate_source
+
+        return candidate_bundle
 
     def find_ffmpeg(self, custom_path: str | Path | None = None) -> Path | None:
         """Localiza ffmpeg priorizando binarios portables junto al ejecutable."""

@@ -34,11 +34,17 @@ class PresetManager:
         self._builtin = self._load_builtin()
 
     def _load_builtin(self) -> list[dict[str, Any]]:
-        path = self.paths.presets_dir / "restoration" / "builtin_presets.json"
-        if not path.is_file():
-            path = self.paths.bundle_root / "presets" / "restoration" / "builtin_presets.json"
-        if not path.is_file():
-            logger.warning("No se encontró builtin_presets.json en %s", path)
+        candidates = (
+            self.paths.presets_dir / "restoration" / "builtin_presets.json",
+            self.paths.bundle_root / "presets" / "restoration" / "builtin_presets.json",
+            Path(__file__).resolve().parent.parent / "presets" / "restoration" / "builtin_presets.json",
+        )
+        path = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if path is None:
+            logger.warning(
+                "No se encontró builtin_presets.json en ninguna ruta: %s",
+                ", ".join(str(candidate) for candidate in candidates),
+            )
             return []
         raw = json.loads(path.read_text(encoding="utf-8"))
         return [dict(item, is_custom=False) for item in raw.get("presets", [])]

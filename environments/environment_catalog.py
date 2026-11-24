@@ -28,11 +28,17 @@ class EnvironmentCatalog:
         self._items = self._load()
 
     def _load(self) -> dict[str, EnvironmentDefinition]:
-        path = self.paths.presets_dir / "environments" / "builtin_environments.json"
-        if not path.is_file():
-            path = self.paths.bundle_root / "presets" / "environments" / "builtin_environments.json"
-        if not path.is_file():
-            logger.warning("No se encontró builtin_environments.json en %s", path)
+        candidates = (
+            self.paths.presets_dir / "environments" / "builtin_environments.json",
+            self.paths.bundle_root / "presets" / "environments" / "builtin_environments.json",
+            Path(__file__).resolve().parent.parent / "presets" / "environments" / "builtin_environments.json",
+        )
+        path = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if path is None:
+            logger.warning(
+                "No se encontró builtin_environments.json en ninguna ruta: %s",
+                ", ".join(str(candidate) for candidate in candidates),
+            )
             return {}
         raw = json.loads(path.read_text(encoding="utf-8"))
         out: dict[str, EnvironmentDefinition] = {}

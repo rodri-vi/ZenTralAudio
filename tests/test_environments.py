@@ -44,6 +44,26 @@ def test_catalog_contains_all_fourteen_environments() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.unit
+def test_frozen_portable_paths_resolve_bundled_catalogs_and_manifests(
+    portable_paths: AppPaths,
+) -> None:
+    """Los recursos inmutables siguen accesibles aunque app_root solo contenga datos portables."""
+    catalog = EnvironmentCatalog(portable_paths)
+    assert len(catalog.list_all()) == 14
+
+    acoustics, layers, _ = build_environment_ui_state("bosque", portable_paths)
+    assert "room_size" in acoustics
+    assert len(layers) == 3
+
+    from models.model_manager import ModelManager
+    from presets.preset_manager import PresetManager
+
+    assert PresetManager(portable_paths).list_all()
+    assert ModelManager(portable_paths).list_entries()
+    assert portable_paths.resolve_resource("manifests", "ambience_manifest.json").is_file()
+
+
 def test_ir_convolution_with_dirac_impulse_preserves_signal() -> None:
     voice = make_sine_buffer(
         freq_hz=440.0,
