@@ -73,7 +73,7 @@ jobs:
         run: |
           test -x "dist/ZenTralAudio_Portable/ZenTralAudio.app/Contents/MacOS/ZenTralAudio"
           test -x "dist/ZenTralAudio_Portable/bin/ffmpeg"
-          test -x "dist/ZenTralAudio_Portable/runtimes/ZenTralModelWorker/ZenTralModelWorker/ZenTralModelWorker"
+          test -x "dist/ZenTralAudio_Portable/runtimes/ZenTralModelWorker/ZenTralModelWorker"
           test -f "dist/RELEASE_NOTES_OFFLINE_AI.md"
           ls -lh dist/ZenTralAudio-Offline-AI-macOS-Apple-Silicon.zip*
 
