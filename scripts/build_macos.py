@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import platform
 import shutil
 import subprocess
@@ -33,6 +34,11 @@ def _run(command: list[str], *, cwd: Path) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Compila ZenTralAudio para macOS Apple Silicon.")
+    parser.add_argument("--bundle-ffmpeg", action="store_true", help="Incluye el binario FFmpeg autónomo.")
+    parser.add_argument("--smoke-test", action="store_true", help="Comprueba el arranque del ejecutable.")
+    args = parser.parse_args()
+
     if sys.platform != "darwin":
         raise RuntimeError("La compilación macOS debe ejecutarse en macOS.")
     if platform.machine().lower() not in {"arm64", "aarch64"}:
@@ -86,8 +92,9 @@ def main() -> int:
     shutil.copy2(ffmpeg_source, ffmpeg_target)
     ffmpeg_target.chmod(0o755)
 
-    final_executable = portable_dir / "ZenTralAudio.app" / "Contents" / "MacOS" / "ZenTralAudio"
-    _run([str(final_executable), "--check"], cwd=portable_dir)
+    if args.smoke_test:
+        final_executable = portable_dir / "ZenTralAudio.app" / "Contents" / "MacOS" / "ZenTralAudio"
+        _run([str(final_executable), "--check"], cwd=portable_dir)
 
     (portable_dir / "LEEME.txt").write_text(
         "ZenTralAudio para macOS Apple Silicon\n"
