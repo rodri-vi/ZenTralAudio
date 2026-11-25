@@ -1,0 +1,88 @@
+name: Build macOS Apple Silicon Offline AI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - macos-apple-silicon
+    paths:
+      - ".github/workflows/build-macos-apple-silicon.yml"
+      - "requirements-macos.txt"
+      - "requirements*.txt"
+      - "scripts/build_macos.py"
+      - "scripts/build_offline.py"
+      - "packaging/ZenTralAudio-macos.spec"
+      - "core/paths.py"
+      - "models/isolated_runners/**"
+      - "models/**"
+      - "engine/**"
+      - "app/**"
+      - "resources/**"
+      - "presets/**"
+      - "tests/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-apple-silicon:
+    # macos-15 is the standard GitHub-hosted Apple Silicon ARM64 runner.
+    runs-on: macos-15
+    timeout-minutes: 180
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements-macos.txt
+            requirements-dev.txt
+            requirements-offline-build.txt
+
+      - name: Verificar arquitectura Apple Silicon
+        run: |
+          python -c "import platform; print('Arquitectura:', platform.machine()); assert platform.machine().lower() in ('arm64', 'aarch64'), 'Este build requiere Apple Silicon ARM64'"
+          sw_vers
+          df -h
+
+      - name: Instalar dependencias macOS y modelos IA
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-macos.txt
+          python -c "import torch, torchaudio, torchvision, df, clearvoice, voicefixer, imageio_ffmpeg; print('torch', torch.__version__); print('torchaudio', torchaudio.__version__); print('torchvision', torchvision.__version__); print('MPS disponible:', torch.backends.mps.is_available()); print('FFmpeg:', imageio_ffmpeg.get_ffmpeg_exe())"
+
+      - name: Comprobar entorno y recursos
+        run: |
+          python scripts/check_environment.py
+          python scripts/verify_resources.py
+
+      - name: Ejecutar pruebas automatizadas
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -v -m "unit or integration"
+
+      - name: Descargar pesos y construir paquete macOS Offline AI
+        run: python scripts/build_offline.py --bundle-ffmpeg
+
+      - name: Verificar aplicación y paquete macOS
+        run: |
+          test -x "dist/ZenTralAudio_Portable/ZenTralAudio.app/Contents/MacOS/ZenTralAudio"
+          test -x "dist/ZenTralAudio_Portable/bin/ffmpeg"
+          test -x "dist/ZenTralAudio_Portable/runtimes/ZenTralModelWorker/ZenTralModelWorker/ZenTralModelWorker"
+          test -f "dist/RELEASE_NOTES_OFFLINE_AI.md"
+          ls -lh dist/ZenTralAudio-Offline-AI-macOS-Apple-Silicon.zip*
+
+      - name: Subir paquete macOS como artefacto de prueba
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZenTralAudio-macOS-Apple-Silicon
+          path: |
+            dist/ZenTralAudio-Offline-AI-macOS-Apple-Silicon.zip*
+            dist/RELEASE_NOTES_OFFLINE_AI.md
+          if-no-files-found: error
+          retention-days: 14
