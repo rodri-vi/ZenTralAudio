@@ -180,7 +180,7 @@ def _check_relocated_portable(portable_dir: Path) -> None:
     # La copia a otra ruta comprueba que ningún .venv conserva rutas de la máquina de CI.
     with tempfile.TemporaryDirectory(prefix="zentral_offline_relocated_") as tmp:
         relocated = Path(tmp) / "ZenTralAudio_Portable"
-        shutil.copytree(portable_dir, relocated)
+        shutil.copytree(portable_dir, relocated, symlinks=True)
         exe = (
             relocated / "ZenTralAudio.exe"
             if os.name == "nt"
@@ -326,7 +326,7 @@ def main() -> int:
     inventory = _download_all_models(paths)
 
     dist_dir = ROOT / "dist"
-    builder = "build_windows.py" if os.name == "nt" else "build_macos.py"
+    builder = "build_macos.py" if sys.platform == "darwin" else "build_windows.py"
     command = [sys.executable, str(ROOT / "scripts" / builder)]
     if args.bundle_ffmpeg:
         command.append("--bundle-ffmpeg")
@@ -335,9 +335,9 @@ def main() -> int:
 
     portable_dir = dist_dir / "ZenTralAudio_Portable"
     app_executable = (
-        portable_dir / "ZenTralAudio.exe"
-        if os.name == "nt"
-        else portable_dir / "ZenTralAudio.app" / "Contents" / "MacOS" / "ZenTralAudio"
+        portable_dir / "ZenTralAudio.app" / "Contents" / "MacOS" / "ZenTralAudio"
+        if sys.platform == "darwin"
+        else portable_dir / "ZenTralAudio.exe"
     )
     if not app_executable.is_file():
         raise FileNotFoundError(f"No se encontró el ejecutable principal: {app_executable}")
