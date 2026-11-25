@@ -1,0 +1,4 @@
+# Dependencias de compilación y ejecución Offline AI para macOS Apple Silicon.
+-r requirements-dev.txt
+-r requirements-offline-build.txt
+imageio-ffmpeg>=0.8.1,<0.9.0
