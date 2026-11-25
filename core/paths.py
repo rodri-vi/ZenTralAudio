@@ -51,9 +51,22 @@ class AppPaths:
 
         if is_frozen:
             exe = Path(executable_path or sys.executable).resolve()
-            app_root = exe.parent
             raw_meipass = meipass_path or getattr(sys, "_MEIPASS", None)
-            bundle_root = Path(raw_meipass).resolve() if raw_meipass else app_root
+
+            # PyInstaller coloca el binario de una app macOS en:
+            # <portable>/ZenTralAudio.app/Contents/MacOS/ZenTralAudio
+            # Los datos modificables deben quedar fuera del .app, junto a este.
+            if (
+                exe.parent.name == "MacOS"
+                and exe.parent.parent.name == "Contents"
+                and exe.parent.parent.parent.suffix == ".app"
+            ):
+                app_bundle = exe.parent.parent.parent
+                app_root = app_bundle.parent
+                bundle_root = app_bundle / "Contents" / "Resources"
+            else:
+                app_root = exe.parent
+                bundle_root = Path(raw_meipass).resolve() if raw_meipass else app_root
         else:
             app_root = Path(__file__).resolve().parent.parent
             bundle_root = app_root
