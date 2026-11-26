@@ -22,7 +22,7 @@ on:
       - "tests/**"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-macos-apple-silicon:
@@ -86,3 +86,15 @@ jobs:
             dist/RELEASE_NOTES_OFFLINE_AI.md
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publicar descarga directa de ZenTralAudio para Mac M1
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: macos-m1-offline-ai-${{ github.sha }}
+          target_commitish: ${{ github.sha }}
+          name: ZenTralAudio Offline AI — macOS Apple Silicon (M1)
+          body_path: dist/RELEASE_NOTES_OFFLINE_AI.md
+          files: dist/ZenTralAudio-Offline-AI-macOS-Apple-Silicon.zip
+          make_latest: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
