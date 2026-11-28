@@ -108,6 +108,11 @@ class RestorationTab(QWidget):
         self.spectrogram.file_dropped.connect(self.open_file_requested.emit)
         self._vis_splitter.addWidget(self.waveform)
         self._vis_splitter.addWidget(self.spectrogram)
+        self._vis_splitter.setHandleWidth(8)
+        self._vis_splitter.setStyleSheet(
+            f"QSplitter::handle {{ background: {Palette.BORDER}; }} "
+            f"QSplitter::handle:hover {{ background: {Palette.ACCENT_PRIMARY}; }}"
+        )
         self._vis_splitter.setSizes([180, 110])
         file_layout.addWidget(self._vis_splitter, stretch=1)
         self._update_visualizer_mode()
@@ -117,6 +122,10 @@ class RestorationTab(QWidget):
         self._workspace_splitter = QSplitter(Qt.Orientation.Vertical)
         self._workspace_splitter.setObjectName("RestorationWorkspaceSplitter")
         self._workspace_splitter.setHandleWidth(8)
+        self._workspace_splitter.setStyleSheet(
+            f"QSplitter::handle {{ background: {Palette.BORDER}; }} "
+            f"QSplitter::handle:hover {{ background: {Palette.ACCENT_PRIMARY}; }}"
+        )
         self._workspace_splitter.setChildrenCollapsible(False)
         self._workspace_splitter.addWidget(file_group)
 
@@ -220,7 +229,7 @@ class RestorationTab(QWidget):
         self._workspace_splitter.setStretchFactor(0, 2)
         self._workspace_splitter.setStretchFactor(1, 1)
         self._workspace_splitter.setStretchFactor(2, 3)
-        self._workspace_splitter.setSizes([560, 300, 0])
+        self._workspace_splitter.setSizes([340, 500, 0])
         root.addWidget(self._workspace_splitter, stretch=1)
 
     def set_models_list(self, models: list[dict[str, Any]], selected_id: str | None = None) -> None:
@@ -365,5 +374,5 @@ class RestorationTab(QWidget):
             self._workspace_splitter.setSizes([300, 220, 520])
         else:
             self.advanced_panel.setMinimumHeight(0)
-            self._workspace_splitter.setSizes([560, 300, 0])
+            self._workspace_splitter.setSizes([340, 500, 0])
         self._adv_toggle_btn.setText("OPCIONES AVANZADAS ^" if checked else "OPCIONES AVANZADAS v")
