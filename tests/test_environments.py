@@ -264,3 +264,27 @@ def test_ambience_manager_consent_and_ui_state(
 
     assert "room_size" in acoustics
     assert len(layers) == 3
+
+
+
+@pytest.mark.unit
+def test_overlap_add_wet_cache_matches_reference_and_invalidates() -> None:
+    """La convolución overlap-add conserva la referencia y cambia al variar la IR."""
+    rng = np.random.default_rng(2026)
+    audio = rng.standard_normal((2, 4096)).astype(np.float32) * 0.1
+    ir = rng.standard_normal((2, 257)).astype(np.float32) * 0.02
+
+    first = _cached_wet_convolution("audio-test", "ir-test-a", audio, ir)
+    expected = np.stack(
+        [fftconvolve(audio[ch], ir[ch], mode="full")[: audio.shape[1]] for ch in range(2)]
+    ).astype(np.float32)
+    np.testing.assert_allclose(first, expected, rtol=2e-5, atol=2e-6)
+
+    # Misma clave reutiliza el mismo resultado sin alterarlo.
+    again = _cached_wet_convolution("audio-test", "ir-test-a", audio, ir)
+    np.testing.assert_array_equal(again, first)
+
+    changed_ir = ir.copy()
+    changed_ir[:, 0] *= 2.0
+    changed = _cached_wet_convolution("audio-test", "ir-test-b", audio, changed_ir)
+    assert not np.allclose(changed, first)
