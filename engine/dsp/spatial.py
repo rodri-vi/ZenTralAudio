@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.signal import lfilter
 
 from engine.audio_mixer import apply_pan
 from engine.audio_types import AudioBuffer
+from engine.dsp.stft import (
+    frame_count,
+    inverse_chunk,
+    iter_spectra,
+    overlap_add_chunk,
+    overlap_add_norm,
+    pad_for_frames,
+)
 
 
 def apply_dsp_dereverb(buffer: AudioBuffer, *, amount: float = 0.0) -> AudioBuffer:
@@ -17,38 +26,41 @@ def apply_dsp_dereverb(buffer: AudioBuffer, *, amount: float = 0.0) -> AudioBuff
     n_fft = 1024
     hop = 256
     win = np.sqrt(np.hanning(n_fft)).astype(np.float32)
+    win_sq = win * win
     out = np.zeros_like(buffer.samples, dtype=np.float32)
     decay_alpha = 0.72 + 0.16 * amt
+    sub_amount = 0.65 * amt
+    floor_ratio = 1.0 - 0.75 * amt
+    bins = n_fft // 2 + 1
 
     for ch in range(buffer.channels):
         x = buffer.samples[ch]
         n = x.shape[0]
-        pad_tail = (hop - ((n - n_fft) % hop)) % hop if n >= n_fft else (n_fft - n)
-        x_pad = np.pad(x, (0, pad_tail), mode="constant")
+        x_pad, lead = pad_for_frames(x, n_fft, hop)
         total = x_pad.shape[0]
-        starts = range(0, total - n_fft + 1, hop)
+        frames = frame_count(total, n_fft, hop)
 
-        frames = np.stack([x_pad[s : s + n_fft] * win for s in starts], axis=0)
-        spec = np.fft.rfft(frames, axis=1)
-        mag = np.abs(spec)
-        phase = np.angle(spec)
-
-        # Estima energía reverberante retrasada por banda y la atenúa proporcionalmente
-        reverb_est = np.zeros_like(mag)
-        for t in range(1, mag.shape[0]):
-            reverb_est[t] = decay_alpha * reverb_est[t - 1] + (1.0 - decay_alpha) * mag[t - 1]
-
-        clean_mag = np.maximum(mag - (0.65 * amt) * reverb_est, mag * (1.0 - 0.75 * amt))
-        recon = np.fft.irfft(clean_mag * np.exp(1j * phase), n=n_fft, axis=1).astype(np.float32)
-
+        # Estima energía reverberante retrasada por banda (filtro recursivo sobre la
+        # magnitud de la trama anterior) y la atenúa proporcionalmente.
+        previous_mag = np.zeros((1, bins), dtype=np.float32)
+        state = np.zeros((1, bins), dtype=np.float64)
         y = np.zeros(total, dtype=np.float32)
-        norm = np.zeros(total, dtype=np.float32)
-        win2 = win * win
-        for idx, s in enumerate(starts):
-            y[s : s + n_fft] += recon[idx] * win
-            norm[s : s + n_fft] += win2
-        y /= np.maximum(norm, 1e-6)
-        out[ch] = y[:n]
+        for first, spec in iter_spectra(x_pad, win, hop):
+            mag = np.abs(spec)
+            delayed = np.concatenate([previous_mag, mag[:-1]], axis=0)
+            previous_mag = mag[-1:]
+            reverb_est, state = lfilter(
+                [1.0 - decay_alpha], [1.0, -decay_alpha], delayed, axis=0, zi=state
+            )
+            clean_mag = np.maximum(mag - sub_amount * reverb_est, mag * floor_ratio)
+            ratio = (clean_mag / np.maximum(mag, 1e-30)).astype(np.float32)
+            ratio[mag <= 0.0] = 0.0
+            recon = inverse_chunk(spec * ratio, n_fft)
+            recon *= win
+            overlap_add_chunk(y, recon, first, hop)
+
+        y /= np.maximum(overlap_add_norm(total, win_sq, hop, frames), 1e-6)
+        out[ch] = y[lead : lead + n]
 
     return AudioBuffer(samples=out, sample_rate=buffer.sample_rate)
 
