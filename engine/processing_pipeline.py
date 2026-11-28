@@ -69,13 +69,20 @@ class PipelineCache:
             # for pipeline stages that only consume the samples.
             return AudioBuffer(samples=item.samples, sample_rate=item.sample_rate)
 
-    def put(self, key: str, value: AudioBuffer) -> None:
+    def put(self, key: str, value: AudioBuffer, *, copy: bool = True) -> None:
         size_bytes = int(value.samples.nbytes)
         if self._max_bytes <= 0 or size_bytes > self._max_bytes:
             return
 
-        stored = value.copy()
-        stored.samples.setflags(write=False)
+        if copy:
+            stored = value.copy()
+            stored.samples.setflags(write=False)
+        else:
+            # Transferimos la propiedad lógica de este buffer a la caché.
+            # Las etapas posteriores solo leen sus muestras; se marca readonly
+            # para impedir mutaciones accidentales sin duplicar cientos de MB.
+            value.samples.setflags(write=False)
+            stored = AudioBuffer(samples=value.samples, sample_rate=value.sample_rate)
         with self._lock:
             previous = self._store.pop(key, None)
             if previous is not None:
@@ -165,7 +172,7 @@ class ProcessingPipeline:
                 dsp_voice = self._run_dsp_stage(voice_after_ai, config)
                 # Aunque el render haya quedado obsoleto por mover el control,
                 # este resultado sigue siendo válido para la misma señal y parámetros.
-                self._voice_cache.put(voice_key, dsp_voice)
+                self._voice_cache.put(voice_key, dsp_voice, copy=False)
             elif progress_cb:
                 progress_cb(0.55, "Reutilizando voz procesada; ajustando mezcla Dry/Wet...")
 
@@ -209,7 +216,7 @@ class ProcessingPipeline:
             return source.copy()
 
         ai_key = config.ai_stage_cache_key(src_fp)
-        cached_ai = self._ai_cache.get(ai_key)
+        cached_ai = self._ai_cache.get(ai_key, copy=False)
         if cached_ai is not None:
             return cached_ai
 
@@ -244,7 +251,7 @@ class ProcessingPipeline:
         if processed.sample_rate != source.sample_rate or processed.num_samples != source.num_samples:
             processed = resample_audio(processed, source.sample_rate, target_length=source.num_samples)
 
-        self._ai_cache.put(ai_key, processed)
+        self._ai_cache.put(ai_key, processed, copy=False)
         return processed
 
     @staticmethod
