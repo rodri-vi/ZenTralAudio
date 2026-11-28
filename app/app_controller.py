@@ -30,6 +30,7 @@ from core.validation import validate_audio_input_path
 from engine.audio_io import load_audio
 from engine.export_engine import export_with_pipeline
 from engine.preview_engine import get_shared_pipeline, render_preview_from_state
+from engine.playback_utils import calculate_loudness_compensation
 from environments.ambience_manager import AmbienceManager, list_all_managed_resources
 from environments.environment_presets import build_environment_ui_state
 from models.model_registry import get_global_registry
@@ -77,6 +78,8 @@ class _PlaybackState:
     last_source_tag: str = "B"
     pending_crossfade: bool = False
     loudness_match: bool = True
+    gain_comp_processed: float = 1.0
+    gain_comp_a: float = 1.0
     monitor_volume: float = 0.85
     selection_frames: tuple[int, int] | None = None
     rms_levels: list[float] = field(default_factory=lambda: [0.0, 0.0])
@@ -325,6 +328,8 @@ class AppController(QObject):
             self._playback.samples_original = samples
             self._playback.samples_processed = None
             self._playback.samples_a = None
+            self._playback.gain_comp_processed = 1.0
+            self._playback.gain_comp_a = 1.0
             self._playback.sample_rate = int(meta["sample_rate"])
             self._playback.position_frames = 0
             self._playback.selection_frames = None
@@ -374,6 +379,8 @@ class AppController(QObject):
             self._playback.samples_original = None
             self._playback.samples_processed = None
             self._playback.samples_a = None
+            self._playback.gain_comp_processed = 1.0
+            self._playback.gain_comp_a = 1.0
             self._playback.sample_rate = 48000
             self._playback.position_frames = 0
             self._playback.selection_frames = None
@@ -415,9 +422,24 @@ class AppController(QObject):
     def _apply_rendered_audio(self, rendered: np.ndarray) -> None:
         with self._pb_lock:
             # Ignora resultados tardíos si el usuario ha eliminado el audio.
-            if self._playback.samples_original is None:
+            original = self._playback.samples_original
+            selection = self._playback.selection_frames
+            loudness_match = self._playback.loudness_match
+        if original is None:
+            return
+
+        # Medir la compensación una vez al terminar el render, nunca en el callback
+        # de tiempo real que alimenta a sounddevice.
+        gain_comp = (
+            calculate_loudness_compensation(original, rendered, selection)
+            if loudness_match
+            else 1.0
+        )
+        with self._pb_lock:
+            if self._playback.samples_original is not original:
                 return
             self._playback.samples_processed = rendered
+            self._playback.gain_comp_processed = gain_comp
         self.preview_player.set_processing_state(False, "Previsualización actualizada", 1.0)
 
     def _on_render_error(self, message: str) -> None:
@@ -529,13 +551,14 @@ class AppController(QObject):
         else:
             return orig, "orig", 1.0
 
-        gain_comp = 1.0
-        if pb.loudness_match:
-            s0, s1 = pb.selection_frames or (0, min(orig.shape[1], src.shape[1]))
-            s1 = max(s0 + 1, min(s1, orig.shape[1], src.shape[1]))
-            rms_orig = float(np.sqrt(np.mean(orig[:, s0:s1] ** 2)) + 1e-6)
-            rms_src = float(np.sqrt(np.mean(src[:, s0:s1] ** 2)) + 1e-6)
-            gain_comp = max(0.35, min(2.0, rms_orig / rms_src))
+        # La ganancia de sonoridad se precalcula al cambiar los buffers o el
+        # fragmento seleccionado. El callback solo lee un escalar cacheado.
+        if tag == "A":
+            gain_comp = pb.gain_comp_a
+        elif tag == "B":
+            gain_comp = pb.gain_comp_processed
+        else:
+            gain_comp = 1.0
         return src, tag, gain_comp
 
     @staticmethod
@@ -725,6 +748,42 @@ class AppController(QObject):
         self.restoration_tab.advanced_panel.set_values(self._advanced_values)
         self._request_debounced_preview_render()
 
+    def _refresh_loudness_compensation(self) -> None:
+        """Actualiza las ganancias A/B fuera del callback de audio en tiempo real."""
+        with self._pb_lock:
+            original = self._playback.samples_original
+            processed = self._playback.samples_processed
+            snapshot_a = self._playback.samples_a
+            selection = self._playback.selection_frames
+            loudness_match = self._playback.loudness_match
+
+        if original is None or not loudness_match:
+            gain_processed = 1.0
+            gain_a = 1.0
+        else:
+            gain_processed = (
+                calculate_loudness_compensation(original, processed, selection)
+                if processed is not None
+                else 1.0
+            )
+            gain_a = (
+                calculate_loudness_compensation(original, snapshot_a, selection)
+                if snapshot_a is not None
+                else 1.0
+            )
+
+        with self._pb_lock:
+            # No publicar valores calculados para buffers/selecciones ya obsoletos.
+            if (
+                self._playback.samples_original is original
+                and self._playback.samples_processed is processed
+                and self._playback.samples_a is snapshot_a
+                and self._playback.selection_frames == selection
+                and self._playback.loudness_match == loudness_match
+            ):
+                self._playback.gain_comp_processed = gain_processed
+                self._playback.gain_comp_a = gain_a
+
     def _on_selection_changed(self, start_s: float, end_s: float) -> None:
         with self._pb_lock:
             sample_rate = self._playback.sample_rate
@@ -736,11 +795,13 @@ class AppController(QObject):
             first = max(0, min(total, int(round(start_s * sample_rate))))
             last = max(first + 1, min(total, int(round(end_s * sample_rate)))) if total else 0
             self._playback.selection_frames = (first, last) if last > first else None
+        self._refresh_loudness_compensation()
         self.preview_player.set_selection_range(start_s, end_s)
 
     def _on_selection_cleared(self) -> None:
         with self._pb_lock:
             self._playback.selection_frames = None
+        self._refresh_loudness_compensation()
         self.restoration_tab.waveform.set_selection(None, None)
         self.preview_player.set_selection_range(None, None)
 
@@ -770,11 +831,13 @@ class AppController(QObject):
             else:
                 return
             self._playback.pending_crossfade = True
+        self._refresh_loudness_compensation()
         self.preview_player.set_processing_state(False, "Instantánea guardada en A", 1.0)
 
     def _on_loudness_match_toggled(self, checked: bool) -> None:
         with self._pb_lock:
             self._playback.loudness_match = bool(checked)
+        self._refresh_loudness_compensation()
         self.config_manager.settings.loudness_match_preview = bool(checked)
         self.config_manager.save()
 
