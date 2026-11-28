@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pytest
 import soundfile as sf
+from scipy.signal import fftconvolve
 
 from core.exceptions import ResourceDownloadError
 from core.paths import AppPaths
