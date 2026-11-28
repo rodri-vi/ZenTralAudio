@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
+import hashlib
+from functools import lru_cache
 
 import numpy as np
-from scipy.signal import butter, fftconvolve, sosfilt
+from scipy.signal import butter, oaconvolve, sosfilt
 
 from engine.audio_mixer import apply_pan, dry_wet_mix
 from engine.audio_types import AudioBuffer
@@ -37,7 +39,8 @@ def _apply_predelay(samples: np.ndarray, sample_rate: int, predelay_ms: float) -
     return out
 
 
-def build_algorithmic_room_ir(
+@lru_cache(maxsize=12)
+def _build_algorithmic_room_ir_cached(
     sample_rate: int,
     *,
     room_size: float = 45.0,
@@ -82,7 +85,45 @@ def build_algorithmic_room_ir(
     energy = float(np.sqrt(np.mean(np.sum(ir_damped ** 2, axis=1))))
     if energy > 1e-6:
         ir_damped /= energy
-    return AudioBuffer(samples=ir_damped, sample_rate=sample_rate)
+    return ir_damped
+
+
+def build_algorithmic_room_ir(
+    sample_rate: int,
+    *,
+    room_size: float = 45.0,
+    decay_s: float = 1.2,
+    damping: float = 45.0,
+) -> AudioBuffer:
+    """Obtiene la IR paramétrica desde una caché LRU y devuelve una copia segura."""
+    cached = _build_algorithmic_room_ir_cached(
+        int(sample_rate),
+        float(room_size),
+        float(decay_s),
+        float(damping),
+    )
+    return AudioBuffer(samples=cached.copy(), sample_rate=int(sample_rate))
+
+
+@lru_cache(maxsize=4)
+def _cached_wet_convolution(
+    audio_key: str,
+    ir_key: str,
+    sample_rate: int,
+    audio_bytes: bytes,
+    ir_bytes: bytes,
+    audio_shape: tuple[int, ...],
+    ir_shape: tuple[int, ...],
+) -> tuple[bytes, tuple[int, ...]]:
+    """Convolución overlap-add cacheada; se usa bytes para mantener la clave acotada y estable."""
+    audio = np.frombuffer(audio_bytes, dtype=np.float32).reshape(audio_shape)
+    impulse = np.frombuffer(ir_bytes, dtype=np.float32).reshape(ir_shape)
+    n = audio.shape[1]
+    out = np.empty_like(audio, dtype=np.float32)
+    for channel in range(2):
+        conv = oaconvolve(audio[channel], impulse[channel], mode="full")[:n]
+        out[channel] = conv.astype(np.float32, copy=False)
+    return out.tobytes(), out.shape
 
 
 def simulate_acoustic_space(
@@ -129,10 +170,22 @@ def simulate_acoustic_space(
         ir = build_algorithmic_room_ir(sr, room_size=room_size, decay_s=decay_s, damping=damping)
         ir_samples = ir.samples
 
-    wet = np.zeros_like(voice_st.samples, dtype=np.float32)
-    for ch in range(2):
-        conv = fftconvolve(voice_st.samples[ch], ir_samples[ch], mode="full")[:n]
-        wet[ch] = conv.astype(np.float32)
+    # Overlap-add es más eficiente que una FFT global para voz larga + IR de varios segundos.
+    # Reutiliza el wet cuando cambian solo mezcla, nivel, distancia/pan o anchura.
+    voice_contiguous = np.ascontiguousarray(voice_st.samples, dtype=np.float32)
+    ir_contiguous = np.ascontiguousarray(ir_samples, dtype=np.float32)
+    audio_key = hashlib.blake2b(voice_contiguous.view(np.uint8), digest_size=12).hexdigest()
+    ir_key = hashlib.blake2b(ir_contiguous.view(np.uint8), digest_size=12).hexdigest()
+    wet_bytes, wet_shape = _cached_wet_convolution(
+        audio_key,
+        ir_key,
+        sr,
+        voice_contiguous.tobytes(),
+        ir_contiguous.tobytes(),
+        voice_contiguous.shape,
+        ir_contiguous.shape,
+    )
+    wet = np.frombuffer(wet_bytes, dtype=np.float32).reshape(wet_shape).copy()
 
     wet = _apply_predelay(wet, sr, predelay_ms)
     wet_buf = AudioBuffer(samples=wet * eff_reflected, sample_rate=sr)
