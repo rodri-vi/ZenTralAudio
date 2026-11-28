@@ -187,8 +187,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config_manager=config_manager,
                 job_manager=job_manager,
             )
-            window.show()
-            logger.info("Interfaz de ZenTralAudio iniciada.")
+            window.showMaximized()
+            logger.info("Interfaz de ZenTralAudio iniciada en ventana maximizada.")
             return app.exec()
         finally:
             # MainWindow detiene la reproducción y cancela sus tareas al cerrarse.
