@@ -122,6 +122,80 @@ def test_end_to_end_pipeline_with_ai_cache_and_environment_parity(
 
 
 @pytest.mark.integration
+def test_intensity_changes_reuse_full_strength_voice_cache(
+    portable_paths: AppPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cambiar Dry/Wet no debe volver a ejecutar IA ni la cadena DSP vocal."""
+    from models import model_registry
+
+    adapter = _SyntheticTestAdapter()
+    registry = model_registry.get_global_registry(portable_paths)
+    monkeypatch.setitem(registry._adapters, "synthetic_16k", adapter)
+
+    pipeline = get_shared_pipeline()
+    pipeline.clear_cache()
+    source = make_noisy_speech_like_buffer(48000, 0.5)
+
+    # Desactivar los módulos DSP no necesarios deja un wet determinista y permite
+    # contar exactamente cuántas veces se ejecuta la etapa vocal.
+    base_state = {
+        "model_id": "synthetic_16k",
+        "ai_enabled": True,
+        "intensity": 80,
+        "advanced_params": {
+            "nr_enabled": False,
+            "eq_hp_freq": 20,
+            "eq_lp_freq": 24000,
+            "comp_enabled": False,
+            "vocal_presence": 0.0,
+            "vocal_clarity": 0.0,
+            "deesser_amount": 0.0,
+            "vocal_saturation": 0.0,
+            "dereverb_amount": 0.0,
+            "stereo_width": 1.0,
+            "spatial_pan": 0.0,
+        },
+        "environment": {"enabled": False},
+    }
+
+    dsp_calls = 0
+    original_dsp_stage = pipeline._run_dsp_stage
+
+    def counted_dsp_stage(voice: AudioBuffer, config: PipelineConfig) -> AudioBuffer:
+        nonlocal dsp_calls
+        dsp_calls += 1
+        return original_dsp_stage(voice, config)
+
+    monkeypatch.setattr(pipeline, "_run_dsp_stage", counted_dsp_stage)
+    try:
+        preview_80 = render_preview_from_state(
+            source.samples, source.sample_rate, base_state, portable_paths
+        )
+        state_35 = {**base_state, "intensity": 35}
+        preview_35 = render_preview_from_state(
+            source.samples, source.sample_rate, state_35, portable_paths
+        )
+
+        assert adapter.calls == 1
+        assert dsp_calls == 1
+        assert not np.allclose(preview_80, preview_35)
+
+        # Cambiar un parámetro DSP invalida solo la caché vocal, no la caché de IA.
+        state_eq = {
+            **state_35,
+            "advanced_params": {**base_state["advanced_params"], "eq_hp_freq": 120},
+        }
+        render_preview_from_state(
+            source.samples, source.sample_rate, state_eq, portable_paths
+        )
+        assert adapter.calls == 1
+        assert dsp_calls == 2
+    finally:
+        pipeline.clear_cache()
+
+
+@pytest.mark.integration
 def test_main_window_structure_two_tabs_and_permanent_player(
     portable_paths: AppPaths,
     monkeypatch: pytest.MonkeyPatch,
