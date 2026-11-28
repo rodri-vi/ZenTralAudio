@@ -235,12 +235,16 @@ class JobManager:
         future.add_done_callback(_done_callback)
         return handle
 
-    def cancel_group(self, group_key: str) -> None:
-        """Cancela la última tarea asociada a un grupo lógico."""
+    def cancel_group(self, group_key: str) -> bool:
+        """Cancela la última tarea activa de un grupo y señala si había algo que cancelar."""
         with self._lock:
             handle = self._group_latest.get(group_key)
-        if handle is not None:
-            handle.cancel()
+            active = handle is not None and handle.status in (JobStatus.PENDING, JobStatus.RUNNING)
+        if not active or handle is None:
+            return False
+        # Cancelar fuera del lock: Future.cancel() puede ejecutar callbacks síncronos.
+        handle.cancel()
+        return True
 
     def cancel_all(self) -> None:
         """Solicita cancelación de todas las tareas activas o en cola."""
