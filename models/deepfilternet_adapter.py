@@ -71,6 +71,37 @@ def _call_with_safe_stderr(function: Any, *args: Any, **kwargs: Any) -> Any:
             sys.stderr = previous_stderr
 
 
+def _make_git_root_optional(get_git_root: Any) -> Any:
+    """Evita que DeepFilterNet requiera Git instalado en una distribución portable."""
+    def safe_get_git_root() -> str | None:
+        try:
+            return get_git_root()
+        except FileNotFoundError:
+            # df.utils.get_git_root() ejecuta 'git rev-parse'. En un portable
+            # limpio puede no existir git.exe; no disponer de metadatos Git
+            # no debe impedir cargar los pesos ni ejecutar la inferencia.
+            logger.info("Git no está instalado; se omiten los metadatos de revisión de DeepFilterNet.")
+            return None
+        except OSError as exc:
+            logger.warning("No se pudieron consultar metadatos Git de DeepFilterNet: %s", exc)
+            return None
+
+    return safe_get_git_root
+
+
+def _ensure_deepfilternet_git_optional() -> None:
+    """Hace opcional la consulta Git interna de DeepFilterNet para portables."""
+    import df.utils as df_utils  # type: ignore[import-not-found]
+
+    current = df_utils.get_git_root
+    if getattr(current, "_zentral_git_optional", False):
+        return
+
+    safe = _make_git_root_optional(current)
+    setattr(safe, "_zentral_git_optional", True)
+    df_utils.get_git_root = safe
+
+
 def _ensure_torchaudio_compat_shim() -> None:
     """Proporciona shim seguro si torchaudio eliminó torchaudio.backend.common."""
     import torchaudio
@@ -200,6 +231,7 @@ class DeepFilterNet3Adapter(BaseModelAdapter):
             import torch
 
             _ensure_torchaudio_compat_shim()
+            _ensure_deepfilternet_git_optional()
             from df.enhance import init_df  # type: ignore[import-not-found]
         except Exception as exc:
             raise ModelLoadError(
