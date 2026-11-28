@@ -117,6 +117,12 @@ class ProcessingPipeline:
         self._ai_cache.clear()
         self._voice_cache.clear()
         self._full_cache.clear()
+        try:
+            from environments.acoustic_simulator import clear_acoustic_caches
+
+            clear_acoustic_caches()
+        except ImportError:
+            pass
 
     def render(
         self,
@@ -177,8 +183,10 @@ class ProcessingPipeline:
                 progress_cb(0.55, "Reutilizando voz procesada; ajustando mezcla Dry/Wet...")
 
             restored_voice = dry_wet_mix(source, dsp_voice, config.intensity / 100.0)
+            voice_token = f"{voice_key}:{config.intensity}"
         else:
             restored_voice = source.copy()
+            voice_token = f"source:{src_fp}"
 
         if cancel_token:
             cancel_token.raise_if_cancelled()
@@ -188,7 +196,11 @@ class ProcessingPipeline:
             if progress_cb:
                 progress_cb(0.80, "Simulando ambiente acústico...")
             final_mix = self._run_environment_stage(
-                restored_voice, config, paths=app_paths, cancel_token=cancel_token
+                restored_voice,
+                config,
+                paths=app_paths,
+                cancel_token=cancel_token,
+                voice_token=voice_token,
             )
         else:
             final_mix = restored_voice
@@ -313,6 +325,7 @@ class ProcessingPipeline:
         *,
         paths: AppPaths,
         cancel_token: CancellationToken | None,
+        voice_token: str | None = None,
     ) -> AudioBuffer:
         try:
             from environments.environment_engine import apply_environment_stage  # type: ignore[import-not-found]
@@ -322,6 +335,7 @@ class ProcessingPipeline:
                 config=config,
                 paths=paths,
                 cancel_token=cancel_token,
+                voice_token=voice_token,
             )
         except ImportError:
             pass
