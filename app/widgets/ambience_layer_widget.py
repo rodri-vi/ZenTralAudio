@@ -116,8 +116,17 @@ class AmbienceLayerWidget(QFrame):
 
     def _on_solo(self, checked: bool) -> None:
         if not self._syncing:
+            # The controller applies exclusive Solo state to all layer widgets.
+            # Emitting a second generic state event here caused duplicate renders.
             self.solo_toggled.emit(self.layer_id, checked)
-            self._emit_state()
+
+    def set_solo_checked(self, checked: bool) -> None:
+        """Sincroniza el botón Solo sin volver a emitir señales."""
+        self._syncing = True
+        try:
+            self._solo_btn.setChecked(bool(checked))
+        finally:
+            self._syncing = False
 
     def _emit_state(self) -> None:
         if self._syncing:
