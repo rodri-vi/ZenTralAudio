@@ -105,25 +105,31 @@ def build_algorithmic_room_ir(
     return AudioBuffer(samples=cached.copy(), sample_rate=int(sample_rate))
 
 
-@lru_cache(maxsize=4)
+_WET_CACHE_KEY: str | None = None
+_WET_CACHE_VALUE: np.ndarray | None = None
+
+
 def _cached_wet_convolution(
     audio_key: str,
     ir_key: str,
-    sample_rate: int,
-    audio_bytes: bytes,
-    ir_bytes: bytes,
-    audio_shape: tuple[int, ...],
-    ir_shape: tuple[int, ...],
-) -> tuple[bytes, tuple[int, ...]]:
-    """Convolución overlap-add cacheada; se usa bytes para mantener la clave acotada y estable."""
-    audio = np.frombuffer(audio_bytes, dtype=np.float32).reshape(audio_shape)
-    impulse = np.frombuffer(ir_bytes, dtype=np.float32).reshape(ir_shape)
+    audio: np.ndarray,
+    impulse: np.ndarray,
+) -> np.ndarray:
+    """Reutiliza un único wet render sin retener copias de los WAV como claves LRU."""
+    global _WET_CACHE_KEY, _WET_CACHE_VALUE
+    key = f"{audio_key}:{ir_key}"
+    if _WET_CACHE_KEY == key and _WET_CACHE_VALUE is not None:
+        return _WET_CACHE_VALUE.copy()
+
     n = audio.shape[1]
     out = np.empty_like(audio, dtype=np.float32)
     for channel in range(2):
         conv = oaconvolve(audio[channel], impulse[channel], mode="full")[:n]
         out[channel] = conv.astype(np.float32, copy=False)
-    return out.tobytes(), out.shape
+
+    _WET_CACHE_KEY = key
+    _WET_CACHE_VALUE = out.copy()
+    return out
 
 
 def simulate_acoustic_space(
@@ -176,16 +182,12 @@ def simulate_acoustic_space(
     ir_contiguous = np.ascontiguousarray(ir_samples, dtype=np.float32)
     audio_key = hashlib.blake2b(voice_contiguous.view(np.uint8), digest_size=12).hexdigest()
     ir_key = hashlib.blake2b(ir_contiguous.view(np.uint8), digest_size=12).hexdigest()
-    wet_bytes, wet_shape = _cached_wet_convolution(
+    wet = _cached_wet_convolution(
         audio_key,
         ir_key,
-        sr,
-        voice_contiguous.tobytes(),
-        ir_contiguous.tobytes(),
-        voice_contiguous.shape,
-        ir_contiguous.shape,
+        voice_contiguous,
+        ir_contiguous,
     )
-    wet = np.frombuffer(wet_bytes, dtype=np.float32).reshape(wet_shape).copy()
 
     wet = _apply_predelay(wet, sr, predelay_ms)
     wet_buf = AudioBuffer(samples=wet * eff_reflected, sample_rate=sr)
