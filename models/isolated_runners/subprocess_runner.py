@@ -26,7 +26,9 @@ _BUNDLED_WORKER_NAME = "ZenTralModelWorker.exe"
 def find_bundled_worker(model_dir: Path) -> Path | None:
     """Localiza el worker autocontenido relativo a la carpeta portable."""
     portable_root = model_dir.resolve().parent.parent
+    worker_name = _BUNDLED_WORKER_NAME if os.name == "nt" else "ZenTralModelWorker"
     candidates = (
+        portable_root / "runtimes" / "ZenTralModelWorker" / worker_name,
         portable_root / "runtimes" / "ZenTralModelWorker" / _BUNDLED_WORKER_NAME,
         portable_root / "runtimes" / "ZenTralModelWorker" / "ZenTralModelWorker",
     )
@@ -83,7 +85,9 @@ def run_in_isolated_subprocess(
     """Intercambia WAV float32 con el worker portable o el intérprete del .venv."""
     if not python_exe.is_file():
         raise ModelInferenceError(f"Runtime aislado no encontrado: {python_exe}")
-    bundled_worker = python_exe.name.lower() == _BUNDLED_WORKER_NAME.lower()
+    # En macOS los ejecutables no llevan extensión .exe. Identificamos el worker
+    # empaquetado por su carpeta estable, no por el nombre del binario.
+    bundled_worker = python_exe.parent.name.lower() == "zentralmodelworker"
     if not bundled_worker and not worker_script.is_file():
         raise ModelInferenceError(f"Script de inferencia aislada no encontrado: {worker_script}")
 
