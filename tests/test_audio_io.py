@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
 
 import numpy as np
 import pytest
 import soundfile as sf
 
 from core.configuration import AppSettings
-from core.exceptions import ValidationError
+from core.exceptions import JobCancelledError, ValidationError
 from core.paths import AppPaths
-from engine.audio_io import load_audio, write_audio
+from core.job_manager import CancellationToken
+from engine.audio_io import _run_subprocess_cancellable, load_audio, write_audio
 from tests.conftest import make_sine_buffer
 
 
@@ -22,6 +27,38 @@ def test_load_wav_preserves_properties(sample_wav_file: Path, portable_paths: Ap
     assert buf.channels == 2
     assert meta.bit_depth == 24
     assert pytest.approx(meta.duration_seconds, abs=1e-3) == 0.5
+
+
+@pytest.mark.unit
+def test_load_audio_stops_immediately_when_already_cancelled(
+    sample_wav_file: Path,
+) -> None:
+    token = CancellationToken()
+    token.cancel()
+    with pytest.raises(JobCancelledError):
+        load_audio(sample_wav_file, cancel_token=token)
+
+
+@pytest.mark.unit
+def test_cancellable_subprocess_terminates_running_ffmpeg_like_process() -> None:
+    token = CancellationToken()
+    timer = threading.Timer(0.2, token.cancel)
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(JobCancelledError):
+            _run_subprocess_cancellable(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                cancel_token=token,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+    finally:
+        timer.cancel()
+
+    assert time.monotonic() - started < 3.0
 
 
 @pytest.mark.unit
