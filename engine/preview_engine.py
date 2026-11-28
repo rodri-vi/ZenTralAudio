@@ -40,3 +40,20 @@ def render_preview_from_state(
         progress_cb=progress_cb,
     )
     return out.samples
+
+
+def render_preview_window_from_state(
+    samples: np.ndarray,
+    sample_rate: int,
+    state_dict: dict[str, Any],
+    paths: AppPaths,
+    start: int,
+    end: int,
+    ctx: JobContext | None = None,
+) -> np.ndarray | None:
+    """Render aproximado de un fragmento (ver ProcessingPipeline.render_preview_window)."""
+    buf = AudioBuffer(samples=samples, sample_rate=sample_rate)
+    config = PipelineConfig.from_controller_state(state_dict)
+    return _SHARED_PIPELINE.render_preview_window(
+        buf, config, start, end, paths=paths, cancel_token=ctx.token if ctx is not None else None
+    )

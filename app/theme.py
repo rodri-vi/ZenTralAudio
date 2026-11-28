@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QIcon
@@ -41,17 +42,38 @@ QPushButton {{ background-color: {Palette.PANEL_SECONDARY}; border: 1px solid {P
 """
 
 
+def _adapt_fonts_for_platform(qss: str) -> str:
+    """Sustituye Segoe UI (solo Windows) por la fuente del sistema en macOS/Linux.
+
+    Sin esto Qt registra un aviso y pierde tiempo buscando alias de una
+    familia inexistente en cada arranque.
+    """
+    if sys.platform == "win32" or "Segoe UI" not in qss:
+        return qss
+    family = "Helvetica Neue" if sys.platform == "darwin" else "sans-serif"
+    try:
+        from PySide6.QtGui import QFontDatabase, QGuiApplication
+
+        if QGuiApplication.instance() is not None:
+            family = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
+    except Exception:
+        pass
+    return qss.replace('"Segoe UI", ', "").replace('"Segoe UI"', f'"{family}"').replace(
+        'font-family: "Inter"', f'font-family: "{family}", "Inter"'
+    )
+
+
 def load_stylesheet(paths: AppPaths) -> str:
     """Carga la hoja de estilos QSS desde resources/styles con respaldo seguro."""
     qss_path: Path = paths.resolve_resource("styles", "zentral_dark.qss")
     if qss_path.is_file():
         try:
-            return qss_path.read_text(encoding="utf-8")
+            return _adapt_fonts_for_platform(qss_path.read_text(encoding="utf-8"))
         except OSError as exc:
             logger.warning("No se pudo leer %s: %s", qss_path, exc)
     else:
         logger.warning("Hoja de estilos no encontrada en %s; usando tema mínimo.", qss_path)
-    return _FALLBACK_QSS
+    return _adapt_fonts_for_platform(_FALLBACK_QSS)
 
 
 def load_app_icon(paths: AppPaths) -> QIcon:

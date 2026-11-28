@@ -43,6 +43,106 @@ def run_startup_check(paths: AppPaths | None = None) -> int:
     return 0
 
 
+def run_environment_report(paths: AppPaths) -> int:
+    """Diagnóstico legible del entorno real (útil dentro de la .app empaquetada)."""
+    import platform
+
+    report: dict[str, object] = {
+        "python": sys.version.split()[0],
+        "arch": platform.machine(),
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "paths": paths.to_diagnostic_dict(),
+    }
+    failures: list[str] = []
+    try:
+        import numpy
+        import scipy
+        import sounddevice
+        import soundfile
+        import torch
+
+        report["libs"] = {
+            "numpy": numpy.__version__,
+            "scipy": scipy.__version__,
+            "torch": torch.__version__,
+            "soundfile": soundfile.__version__,
+            "libsndfile": soundfile.__libsndfile_version__,
+            "portaudio": sounddevice.get_portaudio_version()[1],
+        }
+        report["default_output"] = str(sounddevice.query_devices(kind="output")["name"])
+    except Exception as exc:
+        failures.append(f"bibliotecas: {exc}")
+
+    try:
+        from engine.dsp import kernels
+
+        report["numba_kernels"] = kernels.warm_up()
+    except Exception as exc:
+        failures.append(f"núcleos DSP: {exc}")
+
+    try:
+        from models.model_registry import ModelRegistry
+
+        registry = ModelRegistry(paths)
+        report["models"] = {
+            adapter.get_capabilities().model_id: adapter.get_status().value
+            for adapter in registry.list_adapters()
+        }
+    except Exception as exc:
+        failures.append(f"modelos: {exc}")
+
+    report["failures"] = failures
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 1 if failures else 0
+
+
+def _warm_up_dsp_kernels_in_background() -> None:
+    """Compila los núcleos Numba mientras se construye la interfaz (≈1 s)."""
+    import threading
+
+    def _warm() -> None:
+        try:
+            from engine.dsp import kernels
+
+            kernels.warm_up()
+        except Exception:
+            logger.debug("No se pudieron precompilar los núcleos DSP", exc_info=True)
+
+    threading.Thread(target=_warm, name="ZenTralDSPWarmup", daemon=True).start()
+
+
+class _FileOpenFilter:
+    """Recibe los archivos que macOS entrega a la app (QFileOpenEvent)."""
+
+    def __new__(cls, parent):  # noqa: ANN001
+        from PySide6.QtCore import QEvent, QObject
+
+        class _Filter(QObject):
+            def __init__(self, owner) -> None:  # noqa: ANN001
+                super().__init__(owner)
+                self._pending: list[str] = []
+                self._callback = None
+
+            def attach(self, callback) -> None:  # noqa: ANN001
+                self._callback = callback
+                pending, self._pending = self._pending, []
+                for path in pending[-1:]:
+                    callback(path)
+
+            def eventFilter(self, obj, event) -> bool:  # noqa: ANN001, N802
+                if event.type() == QEvent.Type.FileOpen:
+                    path = event.file()
+                    if path:
+                        if self._callback is None:
+                            self._pending.append(path)
+                        else:
+                            self._callback(path)
+                    return True
+                return False
+
+        return _Filter(parent)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Arranca la interfaz gráfica o ejecuta el chequeo headless solicitado por CI."""
     parser = argparse.ArgumentParser(prog=APP_NAME, description="Restauración de audio con IA y DSP")
@@ -58,16 +158,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--smoke-test-model",
-        choices=("deepfilternet3",),
-        help="Ejecuta una inferencia corta real con un modelo IA incluido.",
+        choices=(
+            "deepfilternet3",
+            "mossformer2_se_48k",
+            "mossformergan_se_16k",
+            "frcrn_se_16k",
+            "voicefixer",
+        ),
+        help="Ejecuta una inferencia corta real con un modelo IA instalado.",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--check-environment",
+        action="store_true",
+        help="Muestra rutas, FFmpeg, núcleos DSP y estado de los modelos IA, y termina.",
+    )
+    parser.add_argument(
+        "--playback-selftest",
+        metavar="AUDIO",
+        help="Abre la interfaz, reproduce AUDIO y mide los callbacks de audio en tiempo real.",
+    )
+    parser.add_argument("--selftest-seconds", type=float, default=15.0)
+    parser.add_argument(
+        "--selftest-volume",
+        type=float,
+        default=0.0,
+        help="Volumen de escucha durante el autodiagnóstico (0 = silencio, misma temporización).",
+    )
+    # macOS añade -psn_* al abrir apps antiguas desde Finder; se ignoran argumentos ajenos.
+    args, _unknown = parser.parse_known_args(argv)
 
     try:
         runtime_paths, config_manager = prepare_runtime()
         if args.check:
             logger.info("Modo --check completado correctamente.")
             return 0
+        if args.check_environment:
+            return run_environment_report(runtime_paths)
         if args.check_offline:
             from models.base_adapter import ModelStatus
             from models.isolated_runners.subprocess_runner import find_bundled_worker
@@ -130,7 +256,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{args.smoke_test_model} no está disponible: {adapter.get_status_detail()}"
                 )
 
-            sample_rate = 48000
+            sample_rate = adapter.get_capabilities().required_sample_rate
             seconds = 2
             rng = np.random.default_rng(20261124)
             time_axis = np.arange(sample_rate * seconds, dtype=np.float32) / sample_rate
@@ -179,6 +305,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         app = QApplication([sys.argv[0] if sys.argv else APP_NAME])
         app.setApplicationName(APP_NAME)
         app.setOrganizationName(APP_ORGANIZATION)
+        file_open_filter = _FileOpenFilter(app)
+        app.installEventFilter(file_open_filter)
+        _warm_up_dsp_kernels_in_background()
 
         job_manager = JobManager(max_workers=config_manager.settings.max_worker_threads)
         try:
@@ -188,7 +317,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 job_manager=job_manager,
             )
             window.showMaximized()
+            # Archivos abiertos desde Finder ("Abrir con" / arrastrar al Dock).
+            file_open_filter.attach(window.controller.load_audio_file)
             logger.info("Interfaz de ZenTralAudio iniciada en ventana maximizada.")
+            if args.playback_selftest:
+                from app.diagnostics import format_report, run_playback_selftest
+
+                report = run_playback_selftest(
+                    window,
+                    args.playback_selftest,
+                    seconds=args.selftest_seconds,
+                    volume=args.selftest_volume,
+                )
+                logger.info("Autodiagnóstico de reproducción: %s", report)
+                print(format_report(report), flush=True)
+                window.close()
+                return 0 if report["ok"] else 1
             return app.exec()
         finally:
             # MainWindow detiene la reproducción y cancela sus tareas al cerrarse.

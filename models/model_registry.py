@@ -92,6 +92,10 @@ class ModelRegistry:
     def unload_all(self) -> None:
         for adapter in self._adapters.values():
             adapter.unload_model()
+        # Cierra también los workers IA persistentes (liberan varios GB de RAM).
+        from models.isolated_runners.subprocess_runner import shutdown_isolated_workers
+
+        shutdown_isolated_workers()
 
 
 _REGISTRY_LOCK = threading.Lock()

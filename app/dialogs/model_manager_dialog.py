@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
 from typing import Any
 
 from PySide6.QtCore import Signal
@@ -22,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.paths import AppPaths
+from core.platform_utils import open_in_file_manager
 
 
 class ModelManagerDialog(QDialog):
@@ -172,8 +171,4 @@ class ModelManagerDialog(QDialog):
             self.delete_requested.emit(str(m["model_id"]))
 
     def _open_models_dir(self) -> None:
-        self._paths.models_dir.mkdir(parents=True, exist_ok=True)
-        if os.name == "nt":
-            os.startfile(str(self._paths.models_dir))  # type: ignore[attr-defined]
-        else:
-            subprocess.Popen(["xdg-open", str(self._paths.models_dir)])
+        open_in_file_manager(self._paths.models_dir)

@@ -1,6 +1,6 @@
 # ZenTralAudio
 
-**ZenTralAudio** es una aplicación profesional de escritorio para Windows (portable) diseñada para restaurar, mejorar y contextualizar grabaciones de voz mediante inteligencia artificial y procesamiento digital de señales (DSP).
+**ZenTralAudio** es una aplicación profesional de escritorio para Windows (portable) y macOS (Apple Silicon e Intel) diseñada para restaurar, mejorar y contextualizar grabaciones de voz mediante inteligencia artificial y procesamiento digital de señales (DSP).
 
 ---
 
@@ -54,3 +54,79 @@ py -3.11 -m venv .venv
 
 python -m pip install --upgrade pip
 pip install -r requirements-dev.txt
+
+---
+
+## macOS (Apple Silicon e Intel)
+
+ZenTralAudio funciona de forma nativa en macOS (sin Rosetta en Apple Silicon): Python 3.11
+arm64, PySide6, NumPy/SciPy, PyTorch (CPU y GPU Apple *MPS* para ClearVoice), PortAudio/CoreAudio
+y libsndfile.
+
+### Instalación (una sola vez)
+
+```bash
+scripts/setup_macos.sh --with-ai
+```
+
+- No necesita Homebrew ni `sudo`: instala [uv](https://github.com/astral-sh/uv) en el usuario si
+  falta y descarga Python 3.11 de la arquitectura real del Mac.
+- `--with-ai` crea el **runtime IA aislado** (`clearvoice` + `voicefixer`) que usan
+  MossFormer2, MossFormerGAN, FRCRN y VoiceFixer. Se instala aparte porque sus dependencias
+  (streamlit, opencv, soundfile 0.12) chocan con las de la aplicación.
+- `--import-models <carpeta models_data>` reutiliza pesos ya descargados (copia APFS sin
+  duplicar espacio). Los pesos también pueden descargarse desde *Gestionar modelos*.
+
+### Abrir la aplicación
+
+- **Aplicación empaquetada:** `ZenTralAudio.app` (en `~/Applications` o `dist/`), doble clic.
+- **Desde el código fuente:** doble clic en `ZenTralAudio.command` o `scripts/run_macos.sh`.
+
+Ambas comparten datos en las carpetas estándar de macOS:
+
+| Datos | Ubicación |
+| :--- | :--- |
+| Ajustes, modelos, presets, runtime IA | `~/Library/Application Support/ZenTralAudio` |
+| Caché | `~/Library/Caches/ZenTralAudio` |
+| Logs | `~/Library/Logs/ZenTralAudio` |
+| Exportaciones (por defecto) | `~/Music/ZenTralAudio` |
+
+Si junto a la `.app` existe una carpeta `models_data` (edición Offline AI), se mantiene el modo
+portable. `ZENTRALAUDIO_DATA_DIR=/ruta` fuerza una carpeta de datos personalizada.
+
+### Compilar `ZenTralAudio.app`
+
+```bash
+.venv/bin/python scripts/build_macos.py --smoke-test --install
+```
+
+Genera `dist/ZenTralAudio.app` autónoma (Python, dependencias, DeepFilterNet y FFmpeg incluidos,
+firma ad-hoc), la prueba fuera del entorno de desarrollo y la copia a `~/Applications`.
+`--portable` crea además la carpeta portable de la edición Offline AI.
+
+### Notas
+
+- MP3, WAV, FLAC, AIFF y OGG se leen con libsndfile; M4A/AAC usan el FFmpeg incluido.
+- Una app descargada de Internet queda en cuarentena; si macOS la bloquea, usa
+  *clic derecho > Abrir* la primera vez.
+- Diagnóstico: `ZenTralAudio.app/Contents/MacOS/ZenTralAudio --check-environment`.
+- La salida sigue al dispositivo predeterminado de macOS (AirPods, interfaces USB...) sin
+  detener la reproducción.
+- Los modelos del runtime IA se ejecutan en un worker persistente que mantiene el modelo
+  cargado y procesa por segmentos para acotar la memoria (pico ~3 GB).
+
+### Pruebas y mediciones
+
+```bash
+ZENTRALAUDIO_MACOS_USER_DIRS=1 .venv/bin/python scripts/benchmark_ai.py 30
+```
+
+Tiempo de cada modelo IA a través del pipeline real (estéreo y "dual mono").
+
+```bash
+.venv/bin/python scripts/listening_test.py 20 --app dist/ZenTralAudio.app/Contents/MacOS/ZenTralAudio
+```
+
+Validación auditiva: reproduce por BlackHole, graba la salida y busca cortes (requiere
+[BlackHole](https://existential.audio/blackhole/) y permiso de micrófono).
+

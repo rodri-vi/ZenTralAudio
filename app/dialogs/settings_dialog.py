@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -25,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from core.configuration import AppSettings, ConfigManager
 from core.paths import AppPaths
+from core.platform_utils import IS_MACOS, IS_WINDOWS, open_in_file_manager
 
 
 class SettingsDialog(QDialog):
@@ -48,9 +47,15 @@ class SettingsDialog(QDialog):
         form.setSpacing(10)
 
         self._device_combo = QComboBox()
-        self._device_combo.addItem("Automático (GPU CUDA si existe, si no CPU)", "auto")
-        self._device_combo.addItem("Solo CPU", "cpu")
-        self._device_combo.addItem("GPU NVIDIA (CUDA)", "cuda")
+        if IS_MACOS:
+            # PyTorch no ofrece CUDA en macOS; los modelos se ejecutan en la CPU
+            # (nativa arm64 en Apple Silicon).
+            self._device_combo.addItem("Automático (CPU en macOS)", "auto")
+            self._device_combo.addItem("Solo CPU", "cpu")
+        else:
+            self._device_combo.addItem("Automático (GPU CUDA si existe, si no CPU)", "auto")
+            self._device_combo.addItem("Solo CPU", "cpu")
+            self._device_combo.addItem("GPU NVIDIA (CUDA)", "cuda")
         idx = self._device_combo.findData(settings.preferred_device)
         if idx >= 0:
             self._device_combo.setCurrentIndex(idx)
@@ -67,7 +72,11 @@ class SettingsDialog(QDialog):
 
         ffmpeg_row = QHBoxLayout()
         self._ffmpeg_edit = QLineEdit(settings.ffmpeg_custom_path or "")
-        self._ffmpeg_edit.setPlaceholderText("Automático (bin/ffmpeg.exe o PATH del sistema)")
+        self._ffmpeg_edit.setPlaceholderText(
+            "Automático (bin/ffmpeg.exe o PATH del sistema)"
+            if IS_WINDOWS
+            else "Automático (incluido en la app, Homebrew o PATH)"
+        )
         browse_ffmpeg = QPushButton("Buscar...")
         browse_ffmpeg.clicked.connect(self._browse_ffmpeg)
         test_ffmpeg = QPushButton("Verificar")
@@ -91,14 +100,15 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(form)
 
-        portable_lbl = QLabel(f"Raíz portable actual: {paths.app_root}")
+        data_root = paths.data_root or paths.app_root
+        portable_lbl = QLabel(f"Carpeta de datos actual: {data_root}")
         portable_lbl.setObjectName("SecondaryText")
         portable_lbl.setWordWrap(True)
         layout.addWidget(portable_lbl)
 
         folder_row = QHBoxLayout()
-        open_root_btn = QPushButton("Abrir carpeta portable")
-        open_root_btn.clicked.connect(lambda: self._open_folder(paths.app_root))
+        open_root_btn = QPushButton("Abrir carpeta de datos")
+        open_root_btn.clicked.connect(lambda: self._open_folder(data_root))
         open_logs_btn = QPushButton("Abrir carpeta de logs")
         open_logs_btn.clicked.connect(lambda: self._open_folder(paths.logs_dir))
         folder_row.addWidget(open_root_btn)
@@ -133,7 +143,7 @@ class SettingsDialog(QDialog):
             self,
             "Seleccionar ejecutable ffmpeg",
             "",
-            "Ejecutables (*.exe);;Todos (*.*)",
+            "Ejecutables (*.exe);;Todos (*.*)" if IS_WINDOWS else "Todos los archivos (*)",
         )
         if path:
             self._ffmpeg_edit.setText(path)
@@ -151,11 +161,7 @@ class SettingsDialog(QDialog):
             QMessageBox.information(self, "FFmpeg detectado", f"FFmpeg válido encontrado en:\n{found}")
 
     def _open_folder(self, folder: Path) -> None:
-        folder.mkdir(parents=True, exist_ok=True)
-        if os.name == "nt":
-            os.startfile(str(folder))  # type: ignore[attr-defined]
-        else:
-            subprocess.Popen(["xdg-open", str(folder)])
+        open_in_file_manager(folder)
 
     def _save_and_accept(self) -> None:
         cur = self._config_manager.settings

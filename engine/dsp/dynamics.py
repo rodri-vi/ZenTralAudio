@@ -8,6 +8,7 @@ import numpy as np
 from scipy.signal import lfilter
 
 from engine.audio_types import AudioBuffer
+from engine.dsp.kernels import attack_release_smoothing
 
 
 def apply_compressor(
@@ -59,13 +60,7 @@ def apply_compressor(
     att_coeff = math.exp(-1.0 / max(1e-4, (attack_ms / 1000.0) * block_sr))
     rel_coeff = math.exp(-1.0 / max(1e-4, (release_ms / 1000.0) * block_sr))
 
-    smooth_gr_db = np.empty_like(gain_red_db)
-    cur = 0.0
-    for idx in range(num_blocks):
-        target = float(gain_red_db[idx])
-        coeff = att_coeff if target < cur else rel_coeff
-        cur = coeff * cur + (1.0 - coeff) * target
-        smooth_gr_db[idx] = cur
+    smooth_gr_db = attack_release_smoothing(gain_red_db, att_coeff, rel_coeff)
 
     # Interpolación suave al número exacto de muestras
     block_centers = (np.arange(num_blocks) + 0.5) * hop

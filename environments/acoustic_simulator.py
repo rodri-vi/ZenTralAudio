@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
+import threading
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 import numpy as np
-from scipy.signal import butter, fftconvolve, sosfilt
+from scipy.signal import butter, oaconvolve, sosfilt
 
-from engine.audio_mixer import apply_pan, dry_wet_mix
+from engine.audio_mixer import apply_pan
 from engine.audio_types import AudioBuffer
 from engine.dsp.spatial import apply_stereo_width
 
@@ -37,13 +42,14 @@ def _apply_predelay(samples: np.ndarray, sample_rate: int, predelay_ms: float) -
     return out
 
 
-def build_algorithmic_room_ir(
+@lru_cache(maxsize=12)
+def _build_algorithmic_room_ir_cached(
     sample_rate: int,
     *,
     room_size: float = 45.0,
     decay_s: float = 1.2,
     damping: float = 45.0,
-) -> AudioBuffer:
+) -> np.ndarray:
     """Genera una respuesta acústica determinista de sala (reflexiones tempranas + cola difusa).
 
     No pretende sustituir una IR real medida, sino ofrecer una simulación geométrica
@@ -82,7 +88,148 @@ def build_algorithmic_room_ir(
     energy = float(np.sqrt(np.mean(np.sum(ir_damped ** 2, axis=1))))
     if energy > 1e-6:
         ir_damped /= energy
-    return AudioBuffer(samples=ir_damped, sample_rate=sample_rate)
+    return ir_damped
+
+
+def build_algorithmic_room_ir(
+    sample_rate: int,
+    *,
+    room_size: float = 45.0,
+    decay_s: float = 1.2,
+    damping: float = 45.0,
+) -> AudioBuffer:
+    """Obtiene la IR paramétrica desde una caché LRU y devuelve una copia segura."""
+    cached = _build_algorithmic_room_ir_cached(
+        int(sample_rate),
+        room_size=float(room_size),
+        decay_s=float(decay_s),
+        damping=float(damping),
+    )
+    return AudioBuffer(samples=cached.copy(), sample_rate=int(sample_rate))
+
+
+class _ArrayLRU:
+    """Caché LRU de arrays de solo lectura acotada por número de entradas y bytes.
+
+    Siempre conserva al menos la entrada más reciente, aunque supere el
+    presupuesto, para no perder la reutilización en grabaciones muy largas.
+    """
+
+    def __init__(self, max_entries: int, max_bytes: int) -> None:
+        self.max_entries = max(1, int(max_entries))
+        self.max_bytes = max(0, int(max_bytes))
+        self._store: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> np.ndarray | None:
+        with self._lock:
+            value = self._store.get(key)
+            if value is not None:
+                self._store.move_to_end(key)
+            return value
+
+    def put(self, key: str, value: np.ndarray) -> None:
+        value.setflags(write=False)
+        with self._lock:
+            self._store.pop(key, None)
+            self._store[key] = value
+            total = sum(int(v.nbytes) for v in self._store.values())
+            while len(self._store) > 1 and (
+                len(self._store) > self.max_entries or total > self.max_bytes
+            ):
+                _, oldest = self._store.popitem(last=False)
+                total -= int(oldest.nbytes)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()
+
+    @property
+    def nbytes(self) -> int:
+        with self._lock:
+            return sum(int(v.nbytes) for v in self._store.values())
+
+
+# Dos entradas: la voz original y la procesada (ver ``components`` más abajo).
+_WET_CACHE = _ArrayLRU(max_entries=2, max_bytes=512 * 1024 * 1024)
+_DIRECT_CACHE = _ArrayLRU(max_entries=2, max_bytes=512 * 1024 * 1024)
+_CONVOLUTION_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ZenTralConv")
+
+
+def configure_acoustic_cache_budget(max_bytes: int) -> None:
+    """Ajusta el presupuesto de memoria de las cachés acústicas (por caché)."""
+    _WET_CACHE.max_bytes = max(0, int(max_bytes))
+    _DIRECT_CACHE.max_bytes = max(0, int(max_bytes))
+
+
+def acoustic_cache_bytes() -> int:
+    return _WET_CACHE.nbytes + _DIRECT_CACHE.nbytes
+
+
+def clear_acoustic_caches() -> None:
+    """Libera las señales húmeda y directa retenidas para reutilización."""
+    _WET_CACHE.clear()
+    _DIRECT_CACHE.clear()
+
+
+def _readonly(array: np.ndarray) -> np.ndarray:
+    array.setflags(write=False)
+    return array
+
+
+def _cached_wet_convolution(
+    audio_key: str,
+    ir_key: str,
+    audio: np.ndarray,
+    impulse: np.ndarray,
+    *,
+    cacheable: bool = True,
+) -> np.ndarray:
+    """Convolución IR reutilizable sin retener copias de los WAV como claves.
+
+    Devuelve un array de solo lectura compartido con la caché: los consumidores
+    deben crear nuevos arrays en lugar de modificarlo (se fuerza con ``write=False``).
+    Los dos canales se convolucionan en paralelo; la FFT de SciPy libera el GIL.
+    """
+    key = f"{audio_key}:{ir_key}:{audio.shape}:{impulse.shape}"
+    cached = _WET_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    n = audio.shape[1]
+    channels = audio.shape[0]
+
+    def convolve_channel(channel: int) -> np.ndarray:
+        conv = oaconvolve(audio[channel], impulse[channel], mode="full")[:n]
+        return conv.astype(np.float32, copy=False)
+
+    out = np.empty((channels, n), dtype=np.float32)
+    for channel, result in enumerate(_CONVOLUTION_POOL.map(convolve_channel, range(channels))):
+        out[channel] = result
+    if cacheable:
+        _WET_CACHE.put(key, out)
+    return out
+
+
+def _cached_direct_damping(
+    token: str, samples: np.ndarray, sample_rate: int, damping_pct: float, *, cacheable: bool = True
+) -> np.ndarray:
+    """Absorción aérea de la voz directa; solo depende de la voz y de la distancia."""
+    key = f"{token}:{samples.shape}:{sample_rate}:{damping_pct:.6f}"
+    cached = _DIRECT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    damped = _apply_air_damping(samples, sample_rate, damping_pct)
+    if damped is samples:
+        return samples
+    if cacheable:
+        _DIRECT_CACHE.put(key, damped)
+    return damped
+
+
+def _content_key(samples: np.ndarray) -> str:
+    contiguous = np.ascontiguousarray(samples, dtype=np.float32)
+    return hashlib.blake2b(contiguous.view(np.uint8), digest_size=12).hexdigest()
 
 
 def simulate_acoustic_space(
@@ -90,8 +237,23 @@ def simulate_acoustic_space(
     *,
     ir_buffer: AudioBuffer | None,
     acoustics: dict[str, float],
+    cache_token: str | None = None,
+    components: list[tuple[AudioBuffer, str, float]] | None = None,
+    cacheable: bool = True,
 ) -> AudioBuffer:
-    """Aplica convolución IR o simulación algorítmica más distancia aparente, anchura y pan."""
+    """Aplica convolución IR o simulación algorítmica más distancia aparente, anchura y pan.
+
+    ``cache_token`` identifica de forma determinista el contenido de ``voice``
+    (lo proporciona el pipeline a partir de sus claves de caché). Si se omite, se
+    calcula un hash del contenido. Con él se reutilizan la señal húmeda (la
+    convolución, la parte cara) y la voz directa filtrada cuando solo cambian
+    mezcla, niveles, predelay, anchura o panorámica.
+
+    ``components`` describe ``voice`` como combinación lineal ``Σ peso·señal``
+    (p. ej. original y voz procesada según la intensidad). Como la convolución y
+    el filtrado son lineales, se reutilizan sus resultados por separado y un
+    cambio de intensidad ya no requiere volver a convolucionar.
+    """
     sr = voice.sample_rate
     room_size = float(acoustics.get("room_size", 45.0))
     reverb_mix = max(0.0, min(1.0, float(acoustics.get("reverb_mix", 28.0)) / 100.0))
@@ -104,21 +266,47 @@ def simulate_acoustic_space(
     distance = max(0.0, min(1.0, float(acoustics.get("apparent_distance", 20.0)) / 100.0))
     pan = max(-1.0, min(1.0, float(acoustics.get("pan", 0.0)) / 100.0))
 
-    # Convertir voz a estéreo para imagen espacial consistente
-    voice_st = voice.to_stereo()
-    n = voice_st.num_samples
+    # Convertir voz a estéreo para imagen espacial consistente. Cada parte es
+    # (muestras estéreo, clave de caché, peso).
+    if components:
+        parts = [
+            (np.ascontiguousarray(buf.to_stereo().samples, dtype=np.float32), key, float(weight))
+            for buf, key, weight in components
+            if abs(float(weight)) > 1e-9
+        ]
+    else:
+        voice_samples = np.ascontiguousarray(voice.to_stereo().samples, dtype=np.float32)
+        parts = [(voice_samples, cache_token or ("nocache" if not cacheable else _content_key(voice_samples)), 1.0)]
+    n = parts[0][0].shape[1] if parts else voice.num_samples
+
+    def _weighted_sum(arrays: list[tuple[np.ndarray, float]]) -> np.ndarray:
+        total = np.multiply(arrays[0][0], np.float32(arrays[0][1]), dtype=np.float32)
+        for array, weight in arrays[1:]:
+            total += array * np.float32(weight)
+        return total
 
     # Simulación de absorción aérea en voz directa según distancia aparente
-    direct_sig = voice_st.samples.copy()
     if distance > 0.05:
-        direct_sig = _apply_air_damping(direct_sig, sr, distance * 65.0)
+        direct_parts = [
+            (_cached_direct_damping(key, samples, sr, distance * 65.0, cacheable=cacheable), weight)
+            for samples, key, weight in parts
+        ]
+    else:
+        direct_parts = [(samples, weight) for samples, _key, weight in parts]
+    if not direct_parts:
+        return AudioBuffer(samples=np.zeros((2, n), dtype=np.float32), sample_rate=sr)
+    direct_sig = (
+        direct_parts[0][0]
+        if len(direct_parts) == 1 and direct_parts[0][1] == 1.0
+        else _weighted_sum(direct_parts)
+    )
 
     # Nivel efectivo directo vs reflejado ajustado por distancia aparente
     eff_direct = direct_level * (1.0 - 0.45 * distance)
     eff_reflected = reflected_level * (1.0 + 0.65 * distance)
 
     if reverb_mix <= 0.005 or eff_reflected <= 0.005:
-        out = AudioBuffer(samples=direct_sig * eff_direct, sample_rate=sr)
+        out = AudioBuffer(samples=direct_sig * np.float32(eff_direct), sample_rate=sr)
         out = apply_stereo_width(out, width=stereo_width)
         return apply_pan(out, pan) if abs(pan) > 1e-4 else out
 
@@ -129,19 +317,42 @@ def simulate_acoustic_space(
         ir = build_algorithmic_room_ir(sr, room_size=room_size, decay_s=decay_s, damping=damping)
         ir_samples = ir.samples
 
-    wet = np.zeros_like(voice_st.samples, dtype=np.float32)
-    for ch in range(2):
-        conv = fftconvolve(voice_st.samples[ch], ir_samples[ch], mode="full")[:n]
-        wet[ch] = conv.astype(np.float32)
+    # Overlap-add es más eficiente que una FFT global para voz larga + IR de varios segundos.
+    ir_contiguous = np.ascontiguousarray(ir_samples, dtype=np.float32)
+    ir_key = _content_key(ir_contiguous)
+    wet_parts = [
+        (_cached_wet_convolution(key, ir_key, samples, ir_contiguous, cacheable=cacheable), weight)
+        for samples, key, weight in parts
+    ]
+    wet = wet_parts[0][0] if len(wet_parts) == 1 and wet_parts[0][1] == 1.0 else _weighted_sum(wet_parts)
 
-    wet = _apply_predelay(wet, sr, predelay_ms)
-    wet_buf = AudioBuffer(samples=wet * eff_reflected, sample_rate=sr)
-    dry_buf = AudioBuffer(samples=direct_sig * eff_direct, sample_rate=sr)
+    # Mezcla dry/wet equivalente a dry_wet_mix(directo, húmedo con predelay) seguida de
+    # la compensación de nivel, calculada en un único array de salida.
+    compensation = 1.0 / max(0.8, math.sqrt(1.0 - reverb_mix * 0.25))
+    dry_gain = np.float32(eff_direct * (1.0 - reverb_mix) * compensation)
+    wet_gain = np.float32(eff_reflected * reverb_mix * compensation)
+    mixed = np.multiply(direct_sig, dry_gain, dtype=np.float32)
+    delay_frames = max(0, int(round((max(0.0, predelay_ms) / 1000.0) * sr)))
+    if delay_frames < n:
+        scratch = np.multiply(wet[:, : n - delay_frames], wet_gain, dtype=np.float32)
+        mixed[:, delay_frames:] += scratch
+        del scratch
 
-    mixed = dry_wet_mix(dry_buf, wet_buf, reverb_mix)
-    # Compensación suave para preservar volumen global equilibrado
-    mixed = AudioBuffer(samples=mixed.samples / max(0.8, math.sqrt(1.0 - reverb_mix * 0.25)), sample_rate=sr)
-    mixed = apply_stereo_width(mixed, width=stereo_width)
+    if abs(stereo_width - 1.0) >= 1e-4:
+        _stereo_width_inplace(mixed, stereo_width)
     if abs(pan) > 1e-4:
-        mixed = apply_pan(mixed, pan)
-    return mixed
+        angle = (pan + 1.0) * (math.pi / 4.0)
+        mixed[0] *= np.float32(math.cos(angle) * math.sqrt(2.0))
+        mixed[1] *= np.float32(math.sin(angle) * math.sqrt(2.0))
+    return AudioBuffer(samples=mixed, sample_rate=sr)
+
+
+def _stereo_width_inplace(samples: np.ndarray, width: float) -> None:
+    """Matriz Mid/Side idéntica a ``apply_stereo_width`` sin copias completas extra."""
+    w = np.float32(max(0.0, min(2.0, float(width))))
+    left = samples[0]
+    right = samples[1]
+    mid = (left + right) * np.float32(0.5)
+    side = (left - right) * np.float32(0.5 * w)
+    np.add(mid, side, out=left)
+    np.subtract(mid, side, out=right)

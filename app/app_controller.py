@@ -25,18 +25,32 @@ from app.widgets.dynamic_param_panel import UIParamDefinition
 from core.configuration import ConfigManager
 from core.exceptions import ZenTralAudioError
 from core.job_manager import JobContext, JobManager
+from core.macos_audio import default_output_device_id
 from core.paths import AppPaths
 from core.validation import validate_audio_input_path
 from engine.audio_io import load_audio
 from engine.export_engine import export_with_pipeline
-from engine.preview_engine import get_shared_pipeline, render_preview_from_state
-from engine.playback_utils import calculate_loudness_compensation
-from environments.ambience_manager import AmbienceManager, list_all_managed_resources
+from engine.playback_utils import calculate_loudness_compensation, splice_with_crossfade
+from engine.preview_engine import (
+    get_shared_pipeline,
+    render_preview_from_state,
+    render_preview_window_from_state,
+)
+from environments.ambience_manager import AmbienceManager
 from environments.environment_presets import build_environment_ui_state
 from models.model_registry import get_global_registry
 from presets.preset_manager import PresetManager
 
 logger = logging.getLogger("zentralaudio.controller")
+
+# Reproducción: ~100 ms de colchón frente a pausas del GIL; bloque de 1024 frames.
+PLAYBACK_LATENCY_S = 0.1
+PLAYBACK_BLOCKSIZE = 1024
+CROSSFADE_FRAMES = 512
+# Previsualización progresiva: solo en audios largos, con ventanas de 20 s.
+PROGRESSIVE_MIN_SECONDS = 60
+PROGRESSIVE_WINDOW_SECONDS = 20
+_FADE_CACHE: dict[int, np.ndarray] = {}
 
 
 def build_dsp_parameter_schema() -> list[UIParamDefinition]:
@@ -84,6 +98,13 @@ class _PlaybackState:
     selection_frames: tuple[int, int] | None = None
     rms_levels: list[float] = field(default_factory=lambda: [0.0, 0.0])
     peak_levels: list[float] = field(default_factory=lambda: [0.0, 0.0])
+    # Buffer saliente cuando llega un render nuevo durante la reproducción: el
+    # callback funde ambos durante unos milisegundos para evitar un clic.
+    swap_from: np.ndarray | None = None
+    swap_gain: float = 1.0
+    swap_tag: str = ""
+    output_latency_s: float = 0.0
+    underflows: int = 0
 
 
 class AppController(QObject):
@@ -146,10 +167,19 @@ class AppController(QObject):
         )
         self._pb_lock = threading.Lock()
         self._sd_stream: Any = None
+        self._render_generation = 0
+        self._applied_full_generation = -1
 
         self._ui_timer = QTimer(self)
         self._ui_timer.setInterval(33)
         self._ui_timer.timeout.connect(self._on_playback_tick)
+
+        # Vigila cambios de dispositivo de salida (AirPods, interfaces USB...) y
+        # streams que CoreAudio ha cerrado al desconectar el dispositivo.
+        self._device_watch_timer = QTimer(self)
+        self._device_watch_timer.setInterval(1000)
+        self._device_watch_timer.timeout.connect(self._check_output_device)
+        self._stream_default_device: int | None = None
 
         # Agrupa cambios rápidos de intensidad, acústica y mezcla ambiental.
         # Los valores UI cambian al instante; el audio solo se vuelve a renderizar
@@ -324,7 +354,17 @@ class AppController(QObject):
         self._source_meta = meta
         self.config_manager.add_recent_file(self._source_path)
 
+        # Detener la reproducción anterior: el stream se abre a la frecuencia del
+        # audio y debe recrearse si el nuevo archivo usa otra (si no, sonaría a
+        # velocidad y tono incorrectos).
+        self.stop()
+        # Las cachés del archivo anterior ya no sirven: liberarlas antes de que el
+        # nuevo audio empiece a ocupar memoria.
+        get_shared_pipeline().clear_cache()
+
         with self._pb_lock:
+            self._playback.playing = False
+            self._playback.swap_from = None
             self._playback.samples_original = samples
             self._playback.samples_processed = None
             self._playback.samples_a = None
@@ -374,6 +414,7 @@ class AppController(QObject):
         self.stop()
         self._source_path = None
         self._source_meta = {}
+        get_shared_pipeline().clear_cache()
 
         with self._pb_lock:
             self._playback.samples_original = None
@@ -405,10 +446,18 @@ class AppController(QObject):
             return
 
         state_snapshot = self.export_pipeline_dict()
+        # Cada solicitud recibe un número de generación; solo se aplica el resultado
+        # de la más reciente, aunque un render antiguo termine después.
+        self._render_generation += 1
+        generation = self._render_generation
         self._sig_job_progress.emit(True, "Renderizando previsualización...", 0.05)
+        self._submit_preview_window(original, sr, state_snapshot, generation)
         self.job_manager.submit(
             "preview_render",
-            lambda ctx: render_preview_from_state(original, sr, state_snapshot, self.paths, ctx),
+            lambda ctx: (
+                generation,
+                render_preview_from_state(original, sr, state_snapshot, self.paths, ctx),
+            ),
             group_key="preview_render",
             resource_key="pipeline_compute",
             on_progress=lambda p, msg: self._sig_job_progress.emit(True, msg, p),
@@ -419,7 +468,64 @@ class AppController(QObject):
             on_cancelled=lambda: self._sig_job_progress.emit(False, "Procesamiento cancelado", 0.0),
         )
 
-    def _apply_rendered_audio(self, rendered: np.ndarray) -> None:
+    def _submit_preview_window(
+        self, original: np.ndarray, sr: int, state: dict[str, Any], generation: int
+    ) -> None:
+        """Previsualización progresiva para grabaciones largas.
+
+        Antes del render completo se procesan ~20 s alrededor del cursor y se
+        empalman (con fundidos) en el buffer que está sonando, de modo que el
+        cambio se oye en un segundo aunque el archivo dure muchos minutos.
+        """
+        if original.shape[1] < PROGRESSIVE_MIN_SECONDS * sr:
+            return
+        with self._pb_lock:
+            pb = self._playback
+            anchor = pb.position_frames
+            if not pb.playing and pb.selection_frames is not None:
+                anchor = pb.selection_frames[0]
+        start = max(0, int(anchor))
+        end = min(original.shape[1], start + int(PROGRESSIVE_WINDOW_SECONDS * sr))
+
+        def _job(ctx: JobContext) -> tuple[int, np.ndarray, str] | None:
+            if self._applied_full_generation == generation or self._render_generation != generation:
+                return None  # el render completo ya terminó o hay una petición más nueva
+            window = render_preview_window_from_state(original, sr, state, self.paths, start, end, ctx)
+            if window is None:
+                return None
+            with self._pb_lock:
+                base = self._playback.samples_processed
+                if self._playback.samples_original is not original:
+                    return None
+            if base is None or base.shape != original.shape:
+                base = original
+            return generation, splice_with_crossfade(base, window, start, int(0.01 * sr)), "window"
+
+        self.job_manager.submit(
+            "preview_window",
+            _job,
+            group_key="preview_window",
+            resource_key="pipeline_compute",
+            on_completed=lambda out: self._sig_render_ready.emit(out) if out is not None else None,
+            on_failed=lambda exc: logger.debug("Previsualización rápida no disponible: %s", exc),
+        )
+
+    def _apply_rendered_audio(
+        self, result: tuple[int, np.ndarray] | tuple[int, np.ndarray, str] | np.ndarray
+    ) -> None:
+        is_window = False
+        if isinstance(result, tuple):
+            generation, rendered = result[0], result[1]
+            is_window = len(result) > 2 and result[2] == "window"
+            if generation != self._render_generation:
+                logger.debug("Descartado render obsoleto (generación %s)", generation)
+                return
+            if is_window and self._applied_full_generation == generation:
+                return  # el render completo ya llegó; el aproximado sobra
+            if not is_window:
+                self._applied_full_generation = generation
+        else:
+            rendered = result
         with self._pb_lock:
             # Ignora resultados tardíos si el usuario ha eliminado el audio.
             original = self._playback.samples_original
@@ -438,9 +544,19 @@ class AppController(QObject):
         with self._pb_lock:
             if self._playback.samples_original is not original:
                 return
+            previous = self._playback.samples_processed
+            if self._playback.playing and previous is not None and previous is not rendered:
+                self._playback.swap_from = previous
+                self._playback.swap_gain = self._playback.gain_comp_processed
+                self._playback.swap_tag = "B"
             self._playback.samples_processed = rendered
             self._playback.gain_comp_processed = gain_comp
-        self.preview_player.set_processing_state(False, "Previsualización actualizada", 1.0)
+        if is_window:
+            self.preview_player.set_processing_state(
+                True, "Previsualización rápida aplicada; completando el resto...", 0.5
+            )
+        else:
+            self.preview_player.set_processing_state(False, "Previsualización actualizada", 1.0)
 
     def _on_render_error(self, message: str) -> None:
         if self._source_path is None:
@@ -482,26 +598,152 @@ class AppController(QObject):
             self._playback.playing = True
             sr = self._playback.sample_rate
 
-        if self._sd_stream is None:
-            try:
-                import sounddevice as sd
+        try:
+            self._ensure_output_stream(sr)
+        except Exception as exc:
+            with self._pb_lock:
+                self._playback.playing = False
+            logger.exception("No se pudo abrir la salida de audio")
+            self._show_error(f"No se pudo abrir el dispositivo de salida de audio:\n{exc}")
+            return
+        self._ui_timer.start()
 
-                dev_idx = self.config_manager.settings.output_device_index
-                self._sd_stream = sd.OutputStream(
-                    samplerate=sr,
+    def _resolve_output_device(self, sd: Any) -> int | None:
+        """Devuelve el dispositivo configurado si sigue existiendo y tiene salidas."""
+        index = self.config_manager.settings.output_device_index
+        if index is None:
+            return None
+        try:
+            info = sd.query_devices(int(index))
+            if int(info.get("max_output_channels", 0)) >= 1:
+                return int(index)
+        except Exception:
+            pass
+        logger.warning("Dispositivo de salida %s no disponible; usando el predeterminado.", index)
+        return None
+
+    def _check_output_device(self) -> None:
+        """Reabre la salida si cambió el dispositivo predeterminado o el stream murió."""
+        stream = self._sd_stream
+        if stream is None:
+            self._device_watch_timer.stop()
+            return
+        try:
+            active = bool(stream.active)
+        except Exception:
+            active = False
+        reason: str | None = None
+        if not active:
+            reason = "el stream de salida se detuvo (¿dispositivo desconectado?)"
+        elif self.config_manager.settings.output_device_index is None:
+            current = default_output_device_id()
+            previous = self._stream_default_device
+            if current is not None and previous is not None and current != previous:
+                reason = "cambió el dispositivo de salida predeterminado"
+        if reason is None:
+            return
+        self.reopen_output_stream(reason)
+
+    def reopen_output_stream(self, reason: str) -> None:
+        """Vuelve a abrir la salida conservando la posición y el estado de reproducción."""
+        import sounddevice as sd
+
+        with self._pb_lock:
+            sample_rate = self._playback.sample_rate
+        logger.info("Reabriendo la salida de audio: %s", reason)
+        self._close_output_stream()
+        try:
+            # PortAudio solo enumera dispositivos al inicializarse.
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            logger.debug("No se pudo reinicializar PortAudio", exc_info=True)
+        try:
+            self._ensure_output_stream(sample_rate)
+        except Exception as exc:
+            with self._pb_lock:
+                self._playback.playing = False
+            logger.exception("No se pudo reabrir la salida de audio")
+            self.preview_player.set_error_state(f"Salida de audio no disponible: {exc}")
+
+    def _close_output_stream(self) -> None:
+        stream, self._sd_stream = self._sd_stream, None
+        if stream is None:
+            return
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            logger.debug("Error cerrando el stream de audio", exc_info=True)
+
+    def _ensure_output_stream(self, sample_rate: int) -> None:
+        """Abre (o reutiliza) un stream de salida estable para la frecuencia actual.
+
+        - Se recrea si cambió la frecuencia del audio cargado o si el stream dejó
+          de estar activo (p. ej. se desconectó el dispositivo).
+        - Se pide una latencia de ~100 ms: es un reproductor de previsualización,
+          no un instrumento, y ese colchón absorbe las pausas del GIL de Python
+          provocadas por la interfaz o por los renders en segundo plano. Con la
+          latencia "high" por defecto de CoreAudio (~18 ms) cualquier pausa
+          mayor producía un corte audible.
+        - Si falla, se reinicializa PortAudio (refresca la lista de dispositivos
+          tras conectar/desconectar auriculares o interfaces) y se reintenta con
+          el dispositivo predeterminado.
+        """
+        import sounddevice as sd
+
+        stream = self._sd_stream
+        if stream is not None:
+            try:
+                if int(round(stream.samplerate)) == int(sample_rate) and stream.active:
+                    return
+            except Exception:
+                pass
+            self._close_output_stream()
+
+        attempts: list[int | None] = [self._resolve_output_device(sd)]
+        if attempts[0] is not None:
+            attempts.append(None)
+        last_error: Exception | None = None
+        for attempt, device in enumerate(attempts + [None]):
+            if attempt == len(attempts):
+                # Último intento tras refrescar PortAudio.
+                try:
+                    sd._terminate()
+                    sd._initialize()
+                except Exception:
+                    logger.debug("No se pudo reinicializar PortAudio", exc_info=True)
+            try:
+                new_stream = sd.OutputStream(
+                    samplerate=int(sample_rate),
                     channels=2,
                     dtype="float32",
-                    device=dev_idx,
+                    device=device,
                     callback=self._audio_callback,
-                    blocksize=1024,
+                    blocksize=PLAYBACK_BLOCKSIZE,
+                    latency=PLAYBACK_LATENCY_S,
                 )
-                self._sd_stream.start()
+                new_stream.start()
             except Exception as exc:
-                with self._pb_lock:
-                    self._playback.playing = False
-                self._show_error(f"No se pudo abrir el dispositivo de salida de audio:\n{exc}")
-                return
-        self._ui_timer.start()
+                last_error = exc
+                logger.warning("Fallo abriendo salida de audio (dispositivo=%s): %s", device, exc)
+                continue
+            self._sd_stream = new_stream
+            with self._pb_lock:
+                self._playback.output_latency_s = float(new_stream.latency or 0.0)
+            self._stream_default_device = default_output_device_id()
+            watch = getattr(self, "_device_watch_timer", None)
+            if watch is not None and not watch.isActive():
+                watch.start()
+            logger.info(
+                "Salida de audio abierta: dispositivo=%s, %d Hz, bloque=%s, latencia=%.1f ms",
+                device if device is not None else "predeterminado",
+                int(sample_rate),
+                PLAYBACK_BLOCKSIZE,
+                float(new_stream.latency or 0.0) * 1000.0,
+            )
+            return
+        raise last_error if last_error is not None else RuntimeError("Sin salida de audio")
 
     def pause(self) -> None:
         with self._pb_lock:
@@ -515,13 +757,7 @@ class AppController(QObject):
             )
             pos_s = self._playback.position_frames / float(max(1, self._playback.sample_rate))
         self._ui_timer.stop()
-        if self._sd_stream is not None:
-            try:
-                self._sd_stream.stop()
-                self._sd_stream.close()
-            except Exception:
-                pass
-            self._sd_stream = None
+        self._close_output_stream()
         self.preview_player.set_position(pos_s)
         self.restoration_tab.waveform.set_position(pos_s)
         self.restoration_tab.spectrogram.set_position(pos_s)
@@ -568,93 +804,123 @@ class AppController(QObject):
             return np.repeat(slice_arr, 2, axis=0)
         return slice_arr[:2]
 
-    def _audio_callback(self, outdata: np.ndarray, frames: int, _time_info: Any, _status: Any) -> None:
+    def _buffer_for_tag(self, tag: str) -> tuple[np.ndarray | None, float]:
+        pb = self._playback
+        if tag == "A":
+            return pb.samples_a, pb.gain_comp_a
+        if tag == "B":
+            return pb.samples_processed, pb.gain_comp_processed
+        return pb.samples_original, 1.0
+
+    @staticmethod
+    def _write_block(out: np.ndarray, src: np.ndarray, pos: int, count: int, offset: int, gain: float) -> None:
+        """Copia ``count`` frames de ``src`` (canales, n) a ``out`` (n, 2) aplicando ganancia.
+
+        Escribe directamente sobre el buffer de PortAudio sin crear arrays
+        intermedios del tamaño del bloque.
+        """
+        right = 1 if src.shape[0] > 1 else 0
+        np.multiply(src[0, pos : pos + count], gain, out=out[offset : offset + count, 0])
+        np.multiply(src[right, pos : pos + count], gain, out=out[offset : offset + count, 1])
+
+    def _audio_callback(self, outdata: np.ndarray, frames: int, _time_info: Any, status: Any) -> None:
+        """Callback de tiempo real: solo copia muestras ya renderizadas.
+
+        No se calculan aquí medidores, sonoridad ni procesado: todo eso ocurre
+        en el hilo de la interfaz o en los workers. Así el callback dura unos
+        microsegundos y apenas compite por el GIL.
+        """
+        pb = self._playback
         with self._pb_lock:
-            orig = self._playback.samples_original
-            if not self._playback.playing or orig is None:
+            if status and status.output_underflow:
+                pb.underflows += 1
+            orig = pb.samples_original
+            if not pb.playing or orig is None:
                 outdata.fill(0.0)
-                self._playback.rms_levels = [0.0, 0.0]
-                self._playback.peak_levels = [0.0, 0.0]
                 return
 
             source, tag, gain_comp = self._select_playback_buffer()
-            prev_tag = self._playback.last_source_tag
-            do_xfade = self._playback.pending_crossfade and (tag != prev_tag)
-            self._playback.pending_crossfade = False
-            self._playback.last_source_tag = tag
+            fade_src: np.ndarray | None = None
+            fade_gain = 1.0
+            if pb.pending_crossfade and tag != pb.last_source_tag:
+                fade_src, fade_gain = self._buffer_for_tag(pb.last_source_tag)
+            elif pb.swap_from is not None and pb.swap_tag == tag:
+                fade_src, fade_gain = pb.swap_from, pb.swap_gain
+            pb.pending_crossfade = False
+            pb.swap_from = None
+            pb.last_source_tag = tag
 
             total_frames = source.shape[1]
-            start_bound, end_bound = self._playback.selection_frames or (0, total_frames)
+            start_bound, end_bound = pb.selection_frames or (0, total_frames)
             end_bound = min(end_bound, total_frames)
-            pos = self._playback.position_frames
-            vol = self._playback.monitor_volume
+            pos = pb.position_frames
+            vol = pb.monitor_volume
+            gain = float(gain_comp) * float(vol)
 
             written = 0
-            out_buf = np.zeros((2, frames), dtype=np.float32)
             while written < frames:
                 if pos >= end_bound:
-                    if self._playback.loop and end_bound > start_bound:
+                    if pb.loop and end_bound > start_bound:
                         pos = start_bound
                     else:
-                        self._playback.playing = False
+                        pb.playing = False
                         pos = start_bound
                         break
                 avail = min(frames - written, end_bound - pos)
-                chunk = self._extract_stereo_slice(source, pos, avail) * gain_comp
-                if do_xfade and written == 0 and avail >= 16:
-                    cf = min(avail, 256)
-                    if prev_tag == "orig":
-                        prev_buf = orig
-                    elif prev_tag == "A" and self._playback.samples_a is not None:
-                        prev_buf = self._playback.samples_a
-                    elif prev_tag == "B" and self._playback.samples_processed is not None:
-                        prev_buf = self._playback.samples_processed
-                    else:
-                        prev_buf = orig
-
-                    if pos < prev_buf.shape[1]:
-                        cf = min(cf, prev_buf.shape[1] - pos)
-                        if cf >= 16:
-                            previous = self._extract_stereo_slice(prev_buf, pos, cf)
-                            previous_gain = 1.0
-                            if self._playback.loudness_match and prev_buf is not orig:
-                                s0, s1 = self._playback.selection_frames or (
-                                    0, min(orig.shape[1], prev_buf.shape[1])
-                                )
-                                s1 = min(s1, orig.shape[1], prev_buf.shape[1])
-                                if s1 > s0:
-                                    rms_original = float(np.sqrt(np.mean(orig[:, s0:s1] ** 2)) + 1e-6)
-                                    rms_previous = float(np.sqrt(np.mean(prev_buf[:, s0:s1] ** 2)) + 1e-6)
-                                    previous_gain = max(0.35, min(2.0, rms_original / rms_previous))
-                            fade_in = np.linspace(0.0, 1.0, cf, dtype=np.float32)[None, :]
-                            chunk[:, :cf] = (
-                                previous * previous_gain * (1.0 - fade_in)
-                                + chunk[:, :cf] * fade_in
-                            )
-
-                out_buf[:, written : written + avail] = chunk
+                self._write_block(outdata, source, pos, avail, written, gain)
+                if fade_src is not None and written == 0:
+                    cf = min(avail, CROSSFADE_FRAMES, max(0, fade_src.shape[1] - pos))
+                    if cf >= 16:
+                        fade_in = _FADE_CACHE.get(cf)
+                        if fade_in is None:
+                            fade_in = np.linspace(0.0, 1.0, cf, dtype=np.float32)
+                            _FADE_CACHE[cf] = fade_in
+                        right = 1 if fade_src.shape[0] > 1 else 0
+                        prev_gain = float(fade_gain) * float(vol)
+                        for ch, src_ch in ((0, 0), (1, right)):
+                            seg = outdata[:cf, ch]
+                            previous = fade_src[src_ch, pos : pos + cf] * prev_gain
+                            seg *= fade_in
+                            seg += previous * (1.0 - fade_in)
                 pos += avail
                 written += avail
 
-            out_buf *= vol
-            np.clip(out_buf, -0.999, 0.999, out=out_buf)
-            outdata[:] = out_buf.T
-            self._playback.position_frames = pos
-            self._playback.rms_levels = [
-                float(np.sqrt(np.mean(out_buf[0] ** 2))) if frames else 0.0,
-                float(np.sqrt(np.mean(out_buf[1] ** 2))) if frames else 0.0,
-            ]
-            self._playback.peak_levels = [
-                float(np.max(np.abs(out_buf[0]))) if frames else 0.0,
-                float(np.max(np.abs(out_buf[1]))) if frames else 0.0,
-            ]
+            if written < frames:
+                outdata[written:].fill(0.0)
+            np.clip(outdata, -0.999, 0.999, out=outdata)
+            pb.position_frames = pos
+
+    def _current_levels(self) -> tuple[list[float], list[float]]:
+        """Medidores RMS/pico calculados en el hilo de la UI, no en el callback."""
+        with self._pb_lock:
+            pb = self._playback
+            if not pb.playing or pb.samples_original is None:
+                return [0.0, 0.0], [0.0, 0.0]
+            source, _tag, gain_comp = self._select_playback_buffer()
+            pos = pb.position_frames
+            gain = float(gain_comp) * float(pb.monitor_volume)
+            window = max(256, int(pb.sample_rate * 0.05))
+        start = max(0, min(source.shape[1], pos) - window)
+        block = self._extract_stereo_slice(source, start, max(0, min(source.shape[1], pos) - start))
+        if block.shape[1] == 0:
+            return [0.0, 0.0], [0.0, 0.0]
+        block = np.clip(block * gain, -0.999, 0.999)
+        rms = np.sqrt(np.mean(np.square(block, dtype=np.float64), axis=1))
+        peaks = np.max(np.abs(block), axis=1)
+        return [float(rms[0]), float(rms[1])], [float(peaks[0]), float(peaks[1])]
 
     def _on_playback_tick(self) -> None:
         with self._pb_lock:
             playing = self._playback.playing
-            pos_s = self._playback.position_frames / float(max(1, self._playback.sample_rate))
-            rms = list(self._playback.rms_levels)
-            peaks = list(self._playback.peak_levels)
+            sr = float(max(1, self._playback.sample_rate))
+            frames = self._playback.position_frames
+            if playing:
+                # Lo que suena ahora salió del callback hace ``latencia`` segundos.
+                frames = max(0, frames - int(self._playback.output_latency_s * sr))
+                if self._playback.selection_frames is not None:
+                    frames = max(frames, self._playback.selection_frames[0])
+            pos_s = frames / sr
+        rms, peaks = self._current_levels()
         self.preview_player.set_position(pos_s)
         self.restoration_tab.waveform.set_position(pos_s)
         self.restoration_tab.spectrogram.set_position(pos_s)

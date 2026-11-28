@@ -8,6 +8,7 @@ import numpy as np
 from scipy.ndimage import maximum_filter1d
 
 from engine.audio_types import AudioBuffer
+from engine.dsp.kernels import limiter_gain_smoothing
 
 
 def apply_safety_limiter(buffer: AudioBuffer, *, ceiling_db: float = -1.0) -> AudioBuffer:
@@ -30,15 +31,7 @@ def apply_safety_limiter(buffer: AudioBuffer, *, ceiling_db: float = -1.0) -> Au
 
     # Suavizado rápido de ataque y liberación moderada
     rel_alpha = math.exp(-1.0 / max(1.0, sr * 0.04))
-    smooth_gain = np.empty_like(desired_gain)
-    cur = 1.0
-    for idx in range(desired_gain.shape[0]):
-        g = float(desired_gain[idx])
-        if g < cur:
-            cur = 0.4 * cur + 0.6 * g
-        else:
-            cur = rel_alpha * cur + (1.0 - rel_alpha) * g
-        smooth_gain[idx] = min(cur, g)
+    smooth_gain = limiter_gain_smoothing(desired_gain, rel_alpha)
 
     limited = x * smooth_gain[np.newaxis, :].astype(np.float32)
     # Resguardo final absoluto ante cualquier mínimo sobrepaso numérico

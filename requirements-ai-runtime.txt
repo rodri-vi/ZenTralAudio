@@ -1,0 +1,13 @@
+# Runtime IA aislado para MossFormer2_SE_48K, MossFormerGAN_SE_16K, FRCRN_SE_16K y VoiceFixer.
+#
+# Se instala en <datos>/runtimes/ai-python (en macOS:
+# ~/Library/Application Support/ZenTralAudio/runtimes/ai-python) y NO en el entorno
+# principal: clearvoice y voicefixer arrastran streamlit, opencv, pandas y fijan
+# soundfile 0.12, lo que chocaría con la aplicación. ZenTralAudio lo invoca como
+# subproceso sin red (ver models/isolated_runners/subprocess_runner.py).
+numpy==1.26.4
+torch==2.5.1
+torchaudio==2.5.1
+torchvision==0.20.1
+clearvoice==0.1.2
+voicefixer==0.1.3
