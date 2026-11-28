@@ -353,7 +353,9 @@ class AppController(QObject):
             active = group_cancelled or active
 
         if active:
-            self.preview_player.set_processing_state(True, "Cancelando operación...", -1.0)
+            # Desbloquear visualmente el reproductor de inmediato. El trabajo que
+            # esté dentro de FFmpeg/IA terminará de detenerse en segundo plano.
+            self.preview_player.set_processing_state(False, "Cancelación solicitada", 0.0)
         else:
             self.preview_player.set_processing_state(False, "No hay ninguna operación activa", 0.0)
 
