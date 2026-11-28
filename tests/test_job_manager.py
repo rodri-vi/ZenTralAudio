@@ -67,7 +67,7 @@ def test_replacing_pending_group_job_does_not_deadlock_and_cancels_old_job() -> 
         release_blocker.set()
 
         assert blocking.wait(timeout=3.0) == "released"
-        assert replacement.wait(timeout=3.0) if False else True
+        # La orden de cancelación también alcanza la sustitución que seguía en cola.
         with pytest.raises(JobCancelledError):
             old.wait(timeout=3.0)
         with pytest.raises(JobCancelledError):
