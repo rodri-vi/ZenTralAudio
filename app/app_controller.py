@@ -148,12 +148,13 @@ class AppController(QObject):
         self._ui_timer.setInterval(33)
         self._ui_timer.timeout.connect(self._on_playback_tick)
 
-        # Evita lanzar un render completo por cada punto recorrido al arrastrar
-        # el slider. Solo programa la última intensidad tras una breve pausa.
-        self._intensity_render_timer = QTimer(self)
-        self._intensity_render_timer.setSingleShot(True)
-        self._intensity_render_timer.setInterval(300)
-        self._intensity_render_timer.timeout.connect(self._schedule_preview_render)
+        # Agrupa cambios rápidos de intensidad, acústica y mezcla ambiental.
+        # Los valores UI cambian al instante; el audio solo se vuelve a renderizar
+        # cuando el usuario deja de mover los controles durante 300 ms.
+        self._preview_render_timer = QTimer(self)
+        self._preview_render_timer.setSingleShot(True)
+        self._preview_render_timer.setInterval(300)
+        self._preview_render_timer.timeout.connect(self._schedule_preview_render)
 
         self._connect_signals()
         self._initialize_ui_data()
@@ -335,8 +336,8 @@ class AppController(QObject):
         self._schedule_preview_render()
 
     def _schedule_preview_render(self) -> None:
-        if self._intensity_render_timer.isActive():
-            self._intensity_render_timer.stop()
+        if self._preview_render_timer.isActive():
+            self._preview_render_timer.stop()
 
         with self._pb_lock:
             original = self._playback.samples_original
@@ -638,12 +639,16 @@ class AppController(QObject):
         if self._selected_preset_id:
             self._apply_preset_resolution(self._selected_preset_id)
 
+    def _request_debounced_preview_render(self) -> None:
+        """Renderiza solo el último estado tras una pausa breve en controles continuos."""
+        if self._source_path is not None:
+            self._preview_render_timer.start()
+
     def _on_intensity_changed(self, value: int) -> None:
         self._intensity = max(0, min(100, int(value)))
         # La etiqueta se actualiza en la UI al instante; el cálculo de audio
         # espera 300 ms sin cambios para no saturar CPU mientras se arrastra.
-        if self._source_path is not None:
-            self._intensity_render_timer.start()
+        self._request_debounced_preview_render()
 
     def _on_advanced_param_changed(self, key: str, value: Any) -> None:
         self._advanced_values[key] = value
@@ -726,7 +731,7 @@ class AppController(QObject):
 
     def _on_acoustic_param_changed(self, key: str, value: Any) -> None:
         self._acoustic_params[key] = float(value)
-        self._schedule_preview_render()
+        self._request_debounced_preview_render()
 
     def _on_load_local_ir(self, file_path: str) -> None:
         path = Path(file_path).expanduser()
@@ -784,12 +789,13 @@ class AppController(QObject):
         self._schedule_preview_render()
 
     def _on_layer_changed(self, layer_id: str, state: dict[str, Any]) -> None:
+        # El widget ya refleja el cambio. No reconstruir todas las filas aquí:
+        # hacerlo mientras se arrastra volumen/pan destruye el slider activo.
         for layer in self._layers:
             if layer.get("layer_id") == layer_id:
                 layer.update(state)
                 break
-        self.environment_tab.set_layers(self._layers)
-        self._schedule_preview_render()
+        self._request_debounced_preview_render()
 
     def _on_layer_solo_toggled(self, layer_id: str, checked: bool) -> None:
         for layer in self._layers:
@@ -797,8 +803,9 @@ class AppController(QObject):
                 layer["solo"] = bool(checked)
             elif checked:
                 layer["solo"] = False
-        self.environment_tab.set_layers(self._layers)
-        self._schedule_preview_render()
+        # Actualiza solo los botones Solo; evita reconstruir sliders y widgets.
+        self.environment_tab.set_layer_solo_states(self._layers)
+        self._request_debounced_preview_render()
 
     def _on_master_ambience_vol(self, volume: float) -> None:
         self._master_ambience_vol = max(0.0, min(1.0, float(volume)))
