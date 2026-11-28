@@ -110,4 +110,23 @@ firma ad-hoc), la prueba fuera del entorno de desarrollo y la copia a `~/Applica
 - Una app descargada de Internet queda en cuarentena; si macOS la bloquea, usa
   *clic derecho > Abrir* la primera vez.
 - Diagnóstico: `ZenTralAudio.app/Contents/MacOS/ZenTralAudio --check-environment`.
+- La salida sigue al dispositivo predeterminado de macOS (AirPods, interfaces USB...) sin
+  detener la reproducción.
+- Los modelos del runtime IA se ejecutan en un worker persistente que mantiene el modelo
+  cargado y procesa por segmentos para acotar la memoria (pico ~3 GB).
+
+### Pruebas y mediciones
+
+```bash
+ZENTRALAUDIO_MACOS_USER_DIRS=1 .venv/bin/python scripts/benchmark_ai.py 30
+```
+
+Tiempo de cada modelo IA a través del pipeline real (estéreo y "dual mono").
+
+```bash
+.venv/bin/python scripts/listening_test.py 20 --app dist/ZenTralAudio.app/Contents/MacOS/ZenTralAudio
+```
+
+Validación auditiva: reproduce por BlackHole, graba la salida y busca cortes (requiere
+[BlackHole](https://existential.audio/blackhole/) y permiso de micrófono).
 

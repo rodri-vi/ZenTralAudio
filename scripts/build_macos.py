@@ -97,6 +97,51 @@ def stage_ffmpeg(out_dir: Path) -> Path | None:
     return target
 
 
+# Componentes de Qt que arrastran los hooks pero la app no usa (solo QtCore,
+# QtGui, QtWidgets y QtSvg para el icono).
+_UNUSED_QT = (
+    "Qt/lib/QtPdf.framework",
+    "Qt/lib/QtQuick.framework",
+    "Qt/lib/QtQml.framework",
+    "Qt/lib/QtQmlModels.framework",
+    "Qt/lib/QtQmlMeta.framework",
+    "Qt/lib/QtQmlWorkerScript.framework",
+    "Qt/lib/QtVirtualKeyboard.framework",
+    "Qt/lib/QtNetwork.framework",
+    "Qt/lib/QtOpenGL.framework",
+    "Qt/plugins/platforminputcontexts",
+    "Qt/plugins/networkinformation",
+    "Qt/plugins/tls",
+    "Qt/plugins/generic",
+    "Qt/plugins/imageformats/libqpdf.dylib",
+)
+
+
+def prune_bundle(app_bundle: Path) -> None:
+    """Elimina del bundle componentes sin uso. Se ejecuta antes de firmar."""
+    freed = 0
+    for base in (app_bundle / "Contents" / "Frameworks" / "PySide6", app_bundle / "Contents" / "Resources" / "PySide6"):
+        for relative in _UNUSED_QT:
+            target = base / relative
+            if target.is_symlink() or target.is_file():
+                freed += target.lstat().st_size
+                target.unlink()
+            elif target.is_dir():
+                freed += sum(f.stat().st_size for f in target.rglob("*") if f.is_file() and not f.is_symlink())
+                shutil.rmtree(target)
+    # PyInstaller crea accesos directos a cada framework (p. ej. Resources/QtPdf);
+    # los que apuntaban a lo eliminado quedarían rotos e invalidarían la firma.
+    dangling = [
+        link for link in app_bundle.rglob("*") if link.is_symlink() and not link.exists()
+    ]
+    for link in dangling:
+        link.unlink()
+    print(
+        f"Componentes sin uso eliminados: {freed / 1e6:.0f} MB ({len(dangling)} enlaces rotos)",
+        flush=True,
+    )
+
+
 def smoke_test(app_bundle: Path) -> None:
     """Ejecuta el binario empaquetado fuera del entorno de desarrollo."""
     exe = app_bundle / "Contents" / "MacOS" / "ZenTralAudio"
@@ -167,6 +212,7 @@ def main() -> int:
     exe = app_bundle / "Contents" / "MacOS" / "ZenTralAudio"
     if not exe.is_file():
         raise FileNotFoundError(f"PyInstaller no generó la aplicación esperada: {exe}")
+    prune_bundle(app_bundle)
     # Firma ad-hoc de todo el bundle (obligatoria en Apple Silicon) y verificación.
     _run(["codesign", "--force", "--deep", "--sign", "-", str(app_bundle)])
     _run(["codesign", "--verify", "--deep", "--strict", str(app_bundle)])

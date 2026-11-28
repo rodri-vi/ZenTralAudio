@@ -44,7 +44,6 @@ hiddenimports = [
     "scipy.linalg.cython_lapack",
     "scipy.fft",
     "numba",
-    "imageio_ffmpeg",
 ]
 hiddenimports += collect_submodules("soxr")
 hiddenimports += collect_submodules("core")
@@ -78,6 +77,19 @@ excludes = [
     "streamlit",
     "cv2",
     "pandas",
+    # No se usan en la app: FFmpeg ya va en bin/ (imageio_ffmpeg lo duplicaría) y
+    # librosa/scikit-learn solo los necesita el runtime IA aislado.
+    "imageio_ffmpeg",
+    "librosa",
+    "sklearn",
+    "joblib",
+    "pooch",
+    "PySide6.QtNetwork",
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
+    "PySide6.QtPdf",
+    "PySide6.QtOpenGL",
+    "PySide6.QtDBus",
 ]
 
 a = Analysis(
