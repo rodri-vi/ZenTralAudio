@@ -148,6 +148,13 @@ class AppController(QObject):
         self._ui_timer.setInterval(33)
         self._ui_timer.timeout.connect(self._on_playback_tick)
 
+        # Evita lanzar un render completo por cada punto recorrido al arrastrar
+        # el slider. Solo programa la última intensidad tras una breve pausa.
+        self._intensity_render_timer = QTimer(self)
+        self._intensity_render_timer.setSingleShot(True)
+        self._intensity_render_timer.setInterval(300)
+        self._intensity_render_timer.timeout.connect(self._schedule_preview_render)
+
         self._connect_signals()
         self._initialize_ui_data()
 
@@ -328,6 +335,9 @@ class AppController(QObject):
         self._schedule_preview_render()
 
     def _schedule_preview_render(self) -> None:
+        if self._intensity_render_timer.isActive():
+            self._intensity_render_timer.stop()
+
         with self._pb_lock:
             original = self._playback.samples_original
             sr = self._playback.sample_rate
@@ -630,7 +640,10 @@ class AppController(QObject):
 
     def _on_intensity_changed(self, value: int) -> None:
         self._intensity = max(0, min(100, int(value)))
-        self._schedule_preview_render()
+        # La etiqueta se actualiza en la UI al instante; el cálculo de audio
+        # espera 300 ms sin cambios para no saturar CPU mientras se arrastra.
+        if self._source_path is not None:
+            self._intensity_render_timer.start()
 
     def _on_advanced_param_changed(self, key: str, value: Any) -> None:
         self._advanced_values[key] = value
