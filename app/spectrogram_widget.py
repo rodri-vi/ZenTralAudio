@@ -6,7 +6,16 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QImage, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import (
+    QDragEnterEvent,
+    QDropEvent,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import QWidget
 
 from app.theme import Palette
@@ -104,12 +113,19 @@ class SpectrogramWidget(QWidget):
         self._duration: float = 0.0
         self._sample_rate: int = 0
         self._position: float = 0.0
+        self._scaled: QPixmap | None = None
+        self._scaled_key: tuple | None = None
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        self._scaled = None
+        super().resizeEvent(event)
 
     def set_spectrogram(self, image: QImage | None, duration: float, sample_rate: int) -> None:
         self._image = image
         self._duration = max(0.0, duration)
         self._sample_rate = max(0, sample_rate)
         self._position = 0.0
+        self._scaled = None
         self.update()
 
     def set_position(self, seconds: float) -> None:
@@ -154,7 +170,22 @@ class SpectrogramWidget(QWidget):
             painter.end()
             return
 
-        painter.drawImage(rect, self._image)
+        # Escalar la imagen una sola vez por tamaño, no en cada movimiento del cursor.
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        key = (rect.width(), rect.height(), dpr, id(self._image))
+        if self._scaled is None or self._scaled_key != key:
+            scaled = QPixmap.fromImage(
+                self._image.scaled(
+                    max(1, int(rect.width() * dpr)),
+                    max(1, int(rect.height() * dpr)),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            scaled.setDevicePixelRatio(dpr)
+            self._scaled = scaled
+            self._scaled_key = key
+        painter.drawPixmap(0, 0, self._scaled)
 
         nyquist = self._sample_rate / 2.0
         if nyquist > 0:

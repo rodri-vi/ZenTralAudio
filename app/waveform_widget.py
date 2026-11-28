@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent, QPainter, QPen
+from PySide6.QtCore import QLineF, QRectF, Qt, Signal
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from app.theme import Palette
@@ -37,6 +37,18 @@ class WaveformWidget(QWidget):
         self._dragging_selection = False
         self._drag_anchor_s: float = 0.0
         self._title: str = "Arrastra un archivo de audio aquí o pulsa 'Abrir Audio'"
+        # La forma de onda se dibuja una vez en un pixmap y se reutiliza en cada
+        # repintado del cursor (30 veces/s durante la reproducción).
+        self._wave_cache: QPixmap | None = None
+        self._wave_cache_key: tuple | None = None
+
+    def invalidate_cache(self) -> None:
+        self._wave_cache = None
+        self._wave_cache_key = None
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        self.invalidate_cache()
+        super().resizeEvent(event)
 
     def set_audio(self, samples: np.ndarray | None, sample_rate: int, title: str = "") -> None:
         """Calcula envolvente de picos min/max sin bloquear la pintura."""
@@ -47,6 +59,7 @@ class WaveformWidget(QWidget):
             self._position = 0.0
             self._selection = None
             self._title = title or "Arrastra un archivo de audio aquí o pulsa 'Abrir Audio'"
+            self.invalidate_cache()
             self.update()
             return
 
@@ -67,6 +80,7 @@ class WaveformWidget(QWidget):
         trimmed = arr[:, :usable].reshape(arr.shape[0], -1, chunk)
         self._peaks_min = trimmed.min(axis=2)
         self._peaks_max = trimmed.max(axis=2)
+        self.invalidate_cache()
         self.update()
 
     def set_position(self, seconds: float) -> None:
@@ -150,50 +164,73 @@ class WaveformWidget(QWidget):
                     return
         event.ignore()
 
-    def paintEvent(self, event) -> None:  # noqa: ANN001
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    def _build_wave_cache(self) -> QPixmap:
+        """Dibuja fondo y envolvente min/max por píxel en un pixmap (Retina-aware)."""
         rect = self.rect()
-
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        pixmap = QPixmap(max(1, int(rect.width() * dpr)), max(1, int(rect.height() * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.fillRect(rect, Palette.qcolor(Palette.BG_MAIN))
         painter.setPen(Palette.qcolor(Palette.BORDER))
         painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
-        if self._peaks_min is None or self._peaks_max is None or self._duration <= 0:
-            painter.setPen(Palette.qcolor(Palette.TEXT_SECONDARY))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._title)
-            painter.end()
-            return
-
-        # Selección de fragmento
-        if self._selection is not None:
-            sx = self._time_to_x(self._selection[0])
-            ex = self._time_to_x(self._selection[1])
-            sel_rect = QRectF(sx, 1, max(2.0, ex - sx), rect.height() - 2)
-            painter.fillRect(sel_rect, Palette.qcolor(Palette.ACCENT_SECONDARY, 45))
-
+        assert self._peaks_min is not None and self._peaks_max is not None
         channels, bins = self._peaks_min.shape
+        width = max(1, rect.width())
         lane_h = rect.height() / float(channels)
         colors = [Palette.ACCENT_PRIMARY, Palette.ACCENT_SECONDARY]
+
+        # Agrupa los bins por píxel de forma vectorizada (antes: bucle Python por píxel
+        # en cada repintado, lo que retenía el GIL y competía con el callback de audio).
+        px = np.arange(width)
+        b0 = np.minimum(bins - 1, (px * bins) // width)
+        vmin = np.minimum.reduceat(self._peaks_min, b0, axis=1)
+        vmax = np.maximum.reduceat(self._peaks_max, b0, axis=1)
 
         for ch in range(channels):
             cy = (ch + 0.5) * lane_h
             amp = lane_h * 0.44
             painter.setPen(Palette.qcolor(Palette.BORDER, 140))
             painter.drawLine(0, int(cy), rect.width(), int(cy))
-
             pen = QPen(Palette.qcolor(colors[ch % len(colors)], 220))
             pen.setWidth(1)
             painter.setPen(pen)
+            y_top = cy - vmax[ch] * amp
+            y_bot = cy - vmin[ch] * amp
+            painter.drawLines(
+                [QLineF(float(x), float(t), float(x), float(b)) for x, t, b in zip(px, y_top, y_bot)]
+            )
+        painter.end()
+        return pixmap
 
-            for px in range(rect.width()):
-                b0 = min(bins - 1, int(px * bins / max(1, rect.width())))
-                b1 = min(bins, max(b0 + 1, int((px + 1) * bins / max(1, rect.width()))))
-                vmin = float(self._peaks_min[ch, b0:b1].min())
-                vmax = float(self._peaks_max[ch, b0:b1].max())
-                y_top = cy - vmax * amp
-                y_bot = cy - vmin * amp
-                painter.drawLine(QPointF(px, y_top), QPointF(px, y_bot))
+    def paintEvent(self, event) -> None:  # noqa: ANN001
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        rect = self.rect()
+
+        if self._peaks_min is None or self._peaks_max is None or self._duration <= 0:
+            painter.fillRect(rect, Palette.qcolor(Palette.BG_MAIN))
+            painter.setPen(Palette.qcolor(Palette.BORDER))
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+            painter.setPen(Palette.qcolor(Palette.TEXT_SECONDARY))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._title)
+            painter.end()
+            return
+
+        key = (rect.width(), rect.height(), float(self.devicePixelRatioF()), id(self._peaks_min))
+        if self._wave_cache is None or self._wave_cache_key != key:
+            self._wave_cache = self._build_wave_cache()
+            self._wave_cache_key = key
+        painter.drawPixmap(0, 0, self._wave_cache)
+
+        # Selección de fragmento (capa translúcida sobre la forma de onda)
+        if self._selection is not None:
+            sx = self._time_to_x(self._selection[0])
+            ex = self._time_to_x(self._selection[1])
+            sel_rect = QRectF(sx, 1, max(2.0, ex - sx), rect.height() - 2)
+            painter.fillRect(sel_rect, Palette.qcolor(Palette.ACCENT_SECONDARY, 45))
 
         # Cursor de reproducción
         cursor_x = int(self._time_to_x(self._position))
