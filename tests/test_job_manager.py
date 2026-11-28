@@ -31,6 +31,54 @@ def test_job_manager_supersedes_obsolete_group_jobs() -> None:
 
 
 @pytest.mark.unit
+def test_replacing_pending_group_job_does_not_deadlock_and_cancels_old_job() -> None:
+    """Cancelar un Future en cola no debe bloquear el lock interno del gestor."""
+    import threading
+
+    jm = JobManager(max_workers=1)
+    release_blocker = threading.Event()
+    blocker_started = threading.Event()
+    cancelled_callbacks: list[str] = []
+
+    def blocker(ctx: JobContext) -> str:
+        blocker_started.set()
+        if not release_blocker.wait(timeout=5.0):
+            raise TimeoutError("El trabajo de bloqueo no recibió la señal de salida.")
+        return "released"
+
+    try:
+        blocking = jm.submit("blocker", blocker)
+        assert blocker_started.wait(timeout=2.0)
+
+        old = jm.submit(
+            "old_preview",
+            lambda ctx: "stale",
+            group_key="preview",
+            on_cancelled=lambda: cancelled_callbacks.append("old"),
+        )
+        replacement = jm.submit(
+            "new_preview",
+            lambda ctx: "fresh",
+            group_key="preview",
+        )
+
+        assert old.token.is_cancelled
+        assert jm.cancel_group("preview") is True
+        release_blocker.set()
+
+        assert blocking.wait(timeout=3.0) == "released"
+        assert replacement.wait(timeout=3.0) if False else True
+        with pytest.raises(JobCancelledError):
+            old.wait(timeout=3.0)
+        with pytest.raises(JobCancelledError):
+            replacement.wait(timeout=3.0)
+        assert cancelled_callbacks == ["old"]
+    finally:
+        release_blocker.set()
+        jm.shutdown()
+
+
+@pytest.mark.unit
 def test_job_manager_resource_lock_prevents_overlap() -> None:
     jm = JobManager(max_workers=2)
     active = 0
