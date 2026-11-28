@@ -215,7 +215,7 @@ class AppController(QObject):
         pp.loudness_match_toggled.connect(self._on_loudness_match_toggled)
         pp.monitor_volume_changed.connect(self._on_monitor_volume_changed)
         pp.clear_selection_requested.connect(self._on_selection_cleared)
-        pp.cancel_processing_requested.connect(lambda: self.job_manager.cancel_group("preview_render"))
+        pp.cancel_processing_requested.connect(self.cancel_active_processing)
 
     def _initialize_ui_data(self) -> None:
         self.preview_player.set_monitor_volume(self.config_manager.settings.preview_monitor_volume)
@@ -271,7 +271,12 @@ class AppController(QObject):
 
         def _load_worker(ctx: JobContext) -> tuple[np.ndarray, dict[str, Any]]:
             ctx.check_cancelled()
-            buf, meta_obj = load_audio(validated, paths=self.paths, config=self.config_manager.settings)
+            buf, meta_obj = load_audio(
+                validated,
+                paths=self.paths,
+                config=self.config_manager.settings,
+                cancel_token=ctx.token,
+            )
             ctx.check_cancelled()
             adapter = self.model_registry.get_adapter(self._selected_model_id)
             if adapter is not None:
@@ -305,9 +310,10 @@ class AppController(QObject):
         dur = float(meta["duration_s"])
         self.job_manager.submit(
             "compute_spectrogram",
-            lambda ctx: compute_spectrogram_image(samples, sr),
+            lambda ctx: compute_spectrogram_image(samples, sr, cancel_token=ctx.token),
             group_key="spectrogram",
             on_completed=lambda img: self._sig_spectrogram_ready.emit(img, dur, sr),
+            on_cancelled=lambda: None,
         )
 
     def _apply_loaded_audio(self, samples: np.ndarray, meta: dict[str, Any]) -> None:
@@ -335,6 +341,21 @@ class AppController(QObject):
         self.preview_player.set_selection_range(None, None)
         self.preview_player.set_processing_state(False, f"Listo ({meta['filename']})", 1.0)
         self._schedule_preview_render()
+
+    def cancel_active_processing(self) -> None:
+        """Cancela carga, análisis, previsualización o exportación desde el botón inferior."""
+        active = False
+        # El reproductor comparte el botón Cancelar para las operaciones visibles.
+        # Cancelamos todos estos grupos para cubrir la transición carga -> espectrograma
+        # -> previsualización, sin tocar descargas que tienen sus propios diálogos.
+        for group in ("audio_load", "spectrogram", "preview_render", "export_audio"):
+            group_cancelled = self.job_manager.cancel_group(group)
+            active = group_cancelled or active
+
+        if active:
+            self.preview_player.set_processing_state(True, "Cancelando operación...", -1.0)
+        else:
+            self.preview_player.set_processing_state(False, "No hay ninguna operación activa", 0.0)
 
     def clear_audio(self) -> None:
         """Quita el audio de la sesión sin borrar el archivo original del disco."""
@@ -386,7 +407,7 @@ class AppController(QObject):
             on_failed=lambda exc: self._sig_job_error.emit(
                 exc.format_for_user() if isinstance(exc, ZenTralAudioError) else str(exc)
             ),
-            on_cancelled=lambda: None,
+            on_cancelled=lambda: self._sig_job_progress.emit(False, "Procesamiento cancelado", 0.0),
         )
 
     def _apply_rendered_audio(self, rendered: np.ndarray) -> None:
