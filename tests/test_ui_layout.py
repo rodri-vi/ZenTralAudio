@@ -22,10 +22,10 @@ def test_restoration_tab_has_resizable_work_areas_and_waveform_default(
     assert tab._workspace_splitter.orientation() == Qt.Orientation.Vertical
     assert tab._workspace_splitter.count() == 3
     assert tab._view_mode_combo.currentData() == "waveform"
-    assert not tab.advanced_panel.isVisible()
+    assert tab.advanced_panel.isHidden()
 
     tab._adv_toggle_btn.setChecked(True)
-    assert tab.advanced_panel.isVisible()
+    assert not tab.advanced_panel.isHidden()
     assert tab.advanced_panel.minimumHeight() >= 200
 
     tab.close()
