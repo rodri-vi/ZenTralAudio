@@ -205,3 +205,12 @@ def test_core_audio_default_device_query_is_safe() -> None:
 
     value = default_output_device_id()
     assert value is None or value > 0
+
+
+@pytest.mark.unit
+def test_acoustic_budget_keeps_both_parts_of_a_ten_minute_file_on_8gb() -> None:
+    ProcessingPipeline(memory_budget_bytes=2 * 1024**3)
+    ten_minutes_stereo = 2 * 44100 * 600 * 4
+    assert acoustic_simulator._WET_CACHE.max_bytes >= 2 * ten_minutes_stereo
+    assert acoustic_simulator._DIRECT_CACHE.max_bytes >= 2 * ten_minutes_stereo
+    ProcessingPipeline()  # restaura el presupuesto por defecto

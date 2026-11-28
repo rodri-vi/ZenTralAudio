@@ -140,14 +140,17 @@ class ProcessingPipeline:
         # (25 %: ~2 GB en un Mac de 8 GB), para no forzar el uso de swap.
         budget = int(memory_budget_bytes or default_cache_budget_bytes())
         self.memory_budget_bytes = budget
-        self._ai_cache = PipelineCache(max_entries=2, max_bytes=int(budget * 0.30))
-        self._voice_cache = PipelineCache(max_entries=1, max_bytes=int(budget * 0.25))
-        self._full_cache = PipelineCache(max_entries=2, max_bytes=int(budget * 0.10))
+        # Reparto pensado para que un audio estéreo de 10 min a 44,1 kHz (211 MB por
+        # buffer) mantenga en un Mac de 8 GB sus dos entradas acústicas (original y
+        # procesada); si no, se desalojarían mutuamente y cada cambio reconvolucionaría.
+        self._ai_cache = PipelineCache(max_entries=2, max_bytes=int(budget * 0.25))
+        self._voice_cache = PipelineCache(max_entries=1, max_bytes=int(budget * 0.20))
+        self._full_cache = PipelineCache(max_entries=2, max_bytes=int(budget * 0.05))
         try:
             from environments.acoustic_simulator import configure_acoustic_cache_budget
 
-            # Húmeda y directa: 35 % entre las dos.
-            configure_acoustic_cache_budget(int(budget * 0.175))
+            # Húmeda y directa: 25 % cada una.
+            configure_acoustic_cache_budget(int(budget * 0.25))
         except ImportError:
             pass
 
