@@ -200,7 +200,7 @@ class WaveformWidget(QWidget):
             y_top = cy - vmax[ch] * amp
             y_bot = cy - vmin[ch] * amp
             painter.drawLines(
-                [QLineF(float(x), float(t), float(x), float(b)) for x, t, b in zip(px, y_top, y_bot)]
+                [QLineF(float(x), float(t), float(x), float(b)) for x, t, b in zip(px, y_top, y_bot, strict=True)]
             )
         painter.end()
         return pixmap

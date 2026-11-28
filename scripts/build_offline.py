@@ -330,6 +330,9 @@ def main() -> int:
     command = [sys.executable, str(ROOT / "scripts" / builder)]
     if args.bundle_ffmpeg:
         command.append("--bundle-ffmpeg")
+    if sys.platform == "darwin":
+        # La edición Offline AI conserva la carpeta portable junto a la .app.
+        command.append("--portable")
     command.append("--smoke-test")
     _run(command)
 

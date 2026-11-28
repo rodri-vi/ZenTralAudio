@@ -1,18 +1,35 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Especificación PyInstaller para macOS Apple Silicon (arm64)."""
+"""Especificación PyInstaller para ZenTralAudio.app (macOS arm64 o x86_64).
 
-from pathlib import Path
+Se invoca desde scripts/build_macos.py, que prepara el icono .icns y FFmpeg y
+fija la arquitectura real de la máquina (ZENTRALAUDIO_TARGET_ARCH).
+"""
+
 import importlib.util
+import os
+import platform
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parent
+TARGET_ARCH = os.environ.get("ZENTRALAUDIO_TARGET_ARCH") or platform.machine()
+ICNS = os.environ.get("ZENTRALAUDIO_ICNS") or None
+FFMPEG = os.environ.get("ZENTRALAUDIO_FFMPEG")
 
 datas = [
     (str(ROOT / "resources"), "resources"),
     (str(ROOT / "presets" / "restoration"), "presets/restoration"),
     (str(ROOT / "presets" / "environments"), "presets/environments"),
     (str(ROOT / "LICENSE"), "."),
+    (str(ROOT / "LICENSES_AI.md"), "."),
+    # Script del runtime IA aislado (se ejecuta con el intérprete del runtime, no
+    # con el de la app, por eso debe existir como archivo real dentro del bundle).
+    (str(ROOT / "models" / "isolated_runners" / "worker_entry.py"), "models/isolated_runners"),
 ]
+binaries = []
+if FFMPEG:
+    binaries.append((FFMPEG, "bin"))
 datas += collect_data_files("sounddevice")
 datas += collect_data_files("soundfile")
 
@@ -25,6 +42,9 @@ hiddenimports = [
     "scipy.special._cdflib",
     "scipy.linalg.cython_blas",
     "scipy.linalg.cython_lapack",
+    "scipy.fft",
+    "numba",
+    "imageio_ffmpeg",
 ]
 hiddenimports += collect_submodules("soxr")
 hiddenimports += collect_submodules("core")
@@ -46,15 +66,24 @@ excludes = [
     "matplotlib",
     "tkinter",
     "pytest",
+    "pytestqt",
     "IPython",
     "jupyter",
     "notebook",
+    "PyInstaller",
+    "ruff",
+    "tests",
+    "clearvoice",
+    "voicefixer",
+    "streamlit",
+    "cv2",
+    "pandas",
 ]
 
 a = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
@@ -79,7 +108,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch="arm64",
+    target_arch=TARGET_ARCH,
     codesign_identity=None,
     entitlements_file=None,
 )
@@ -97,7 +126,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="ZenTralAudio.app",
-    icon=None,
+    icon=ICNS,
     bundle_identifier="com.zentralaudio.desktop",
     info_plist={
         "CFBundleName": "ZenTralAudio",
@@ -105,8 +134,26 @@ app = BUNDLE(
         "CFBundleIdentifier": "com.zentralaudio.desktop",
         "CFBundleShortVersionString": "0.1.0",
         "CFBundleVersion": "0.1.0",
-        "LSMinimumSystemVersion": "13.0",
+        "LSMinimumSystemVersion": "12.0",
         "LSApplicationCategoryType": "public.app-category.music",
         "NSHighResolutionCapable": True,
+        "NSHumanReadableCopyright": "ZenTralAudio - MIT License",
+        # La interfaz usa su propio tema oscuro.
+        "NSRequiresAquaSystemAppearance": False,
+        "CFBundleDocumentTypes": [
+            {
+                "CFBundleTypeName": "Audio",
+                "CFBundleTypeRole": "Viewer",
+                "LSHandlerRank": "Alternate",
+                "LSItemContentTypes": [
+                    "public.audio",
+                    "com.microsoft.waveform-audio",
+                    "public.mp3",
+                    "org.xiph.flac",
+                    "public.aiff-audio",
+                    "public.mpeg-4-audio",
+                ],
+            }
+        ],
     },
 )
