@@ -202,6 +202,16 @@ class JobManager:
                     return
 
                 exc = future.exception()
+                if exc is None and handle.token.is_cancelled:
+                    # Cubre la carrera en la que el token se cancela justo después
+                    # del return del worker y antes de ejecutar este callback.
+                    with self._lock:
+                        handle.status = JobStatus.CANCELLED
+                    logger.debug("Tarea cancelada '%s' (%s)", name, job_id)
+                    if on_cancelled:
+                        on_cancelled()
+                    return
+
                 if exc is not None:
                     if isinstance(exc, JobCancelledError):
                         with self._lock:
