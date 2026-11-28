@@ -46,40 +46,76 @@ def fingerprint_audio(buffer: AudioBuffer) -> str:
 class PipelineCache:
     """Caché LRU acotada en memoria para evitar recalcular etapas pesadas sin cambios."""
 
-    def __init__(self, max_entries: int = 8) -> None:
+    def __init__(
+        self,
+        max_entries: int = 8,
+        max_bytes: int = 256 * 1024 * 1024,
+    ) -> None:
         self._max_entries = max(1, max_entries)
+        self._max_bytes = max(0, int(max_bytes))
+        self._current_bytes = 0
         self._lock = threading.Lock()
         self._store: OrderedDict[str, AudioBuffer] = OrderedDict()
 
-    def get(self, key: str) -> AudioBuffer | None:
+    def get(self, key: str, *, copy: bool = True) -> AudioBuffer | None:
         with self._lock:
             item = self._store.get(key)
             if item is None:
                 return None
             self._store.move_to_end(key)
-            return item.copy()
+            if copy:
+                return item.copy()
+            # The cache stores read-only arrays; a shallow AudioBuffer wrapper is safe
+            # for pipeline stages that only consume the samples.
+            return AudioBuffer(samples=item.samples, sample_rate=item.sample_rate)
 
-    def put(self, key: str, value: AudioBuffer) -> None:
+    def put(self, key: str, value: AudioBuffer, *, copy: bool = True) -> None:
+        size_bytes = int(value.samples.nbytes)
+        if self._max_bytes <= 0 or size_bytes > self._max_bytes:
+            return
+
+        if copy:
+            stored = value.copy()
+            stored.samples.setflags(write=False)
+        else:
+            # Transferimos la propiedad lógica de este buffer a la caché.
+            # Las etapas posteriores solo leen sus muestras; se marca readonly
+            # para impedir mutaciones accidentales sin duplicar cientos de MB.
+            value.samples.setflags(write=False)
+            stored = AudioBuffer(samples=value.samples, sample_rate=value.sample_rate)
         with self._lock:
-            self._store[key] = value.copy()
+            previous = self._store.pop(key, None)
+            if previous is not None:
+                self._current_bytes -= int(previous.samples.nbytes)
+            self._store[key] = stored
+            self._current_bytes += size_bytes
             self._store.move_to_end(key)
-            while len(self._store) > self._max_entries:
-                self._store.popitem(last=False)
+            while (
+                len(self._store) > self._max_entries
+                or self._current_bytes > self._max_bytes
+            ):
+                _, oldest = self._store.popitem(last=False)
+                self._current_bytes -= int(oldest.samples.nbytes)
 
     def clear(self) -> None:
         with self._lock:
             self._store.clear()
+            self._current_bytes = 0
 
 
 class ProcessingPipeline:
     """Ejecuta de forma coherente IA -> DSP -> Dry/Wet -> Ambiente -> Limitador."""
 
     def __init__(self) -> None:
-        self._ai_cache = PipelineCache(max_entries=4)
-        self._full_cache = PipelineCache(max_entries=6)
+        # La caché por bytes evita que varias grabaciones largas disparen el consumo de RAM.
+        cache_limit = 768 * 1024 * 1024
+        self._ai_cache = PipelineCache(max_entries=2, max_bytes=cache_limit)
+        self._voice_cache = PipelineCache(max_entries=1, max_bytes=cache_limit)
+        self._full_cache = PipelineCache(max_entries=2, max_bytes=128 * 1024 * 1024)
 
     def clear_cache(self) -> None:
         self._ai_cache.clear()
+        self._voice_cache.clear()
         self._full_cache.clear()
 
     def render(
@@ -113,25 +149,33 @@ class ProcessingPipeline:
             self._full_cache.put(full_key, out)
             return out
 
-        # Etapa 2: Procesamiento IA (con caché independiente para no re-ejecutar al mover EQ/Ambiente)
-        voice_after_ai = self._run_ai_stage(
-            source,
-            config,
-            src_fp=src_fp,
-            paths=app_paths,
-            cancel_token=cancel_token,
-            progress_cb=progress_cb,
-        )
-
-        if cancel_token:
-            cancel_token.raise_if_cancelled()
-
-        # Etapa 3: Cadena DSP activa + mezcla Dry/Wet según intensidad real
-        if progress_cb:
-            progress_cb(0.55, "Aplicando cadena DSP vocal...")
-
+        # Etapas IA + DSP: la señal vocal procesada al 100 % se calcula una sola vez.
+        # La intensidad solo cambia la mezcla Dry/Wet, nunca vuelve a ejecutar los filtros.
         if config.intensity > 0:
-            dsp_voice = self._run_dsp_stage(voice_after_ai, config)
+            voice_key = config.voice_stage_cache_key(src_fp)
+            dsp_voice = self._voice_cache.get(voice_key, copy=False)
+            if dsp_voice is None:
+                voice_after_ai = self._run_ai_stage(
+                    source,
+                    config,
+                    src_fp=src_fp,
+                    paths=app_paths,
+                    cancel_token=cancel_token,
+                    progress_cb=progress_cb,
+                )
+
+                if cancel_token:
+                    cancel_token.raise_if_cancelled()
+
+                if progress_cb:
+                    progress_cb(0.55, "Aplicando cadena DSP vocal al 100 %...")
+                dsp_voice = self._run_dsp_stage(voice_after_ai, config)
+                # Aunque el render haya quedado obsoleto por mover el control,
+                # este resultado sigue siendo válido para la misma señal y parámetros.
+                self._voice_cache.put(voice_key, dsp_voice, copy=False)
+            elif progress_cb:
+                progress_cb(0.55, "Reutilizando voz procesada; ajustando mezcla Dry/Wet...")
+
             restored_voice = dry_wet_mix(source, dsp_voice, config.intensity / 100.0)
         else:
             restored_voice = source.copy()
@@ -172,7 +216,7 @@ class ProcessingPipeline:
             return source.copy()
 
         ai_key = config.ai_stage_cache_key(src_fp)
-        cached_ai = self._ai_cache.get(ai_key)
+        cached_ai = self._ai_cache.get(ai_key, copy=False)
         if cached_ai is not None:
             return cached_ai
 
@@ -198,8 +242,6 @@ class ProcessingPipeline:
         model_params = {
             k: v for k, v in config.advanced_params.items() if str(k).startswith("model_")
         }
-        model_params["intensity_hint"] = config.intensity / 100.0
-
         processed = adapter.process(
             work_buf,
             model_params,
@@ -209,7 +251,7 @@ class ProcessingPipeline:
         if processed.sample_rate != source.sample_rate or processed.num_samples != source.num_samples:
             processed = resample_audio(processed, source.sample_rate, target_length=source.num_samples)
 
-        self._ai_cache.put(ai_key, processed)
+        self._ai_cache.put(ai_key, processed, copy=False)
         return processed
 
     @staticmethod

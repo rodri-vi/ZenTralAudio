@@ -22,13 +22,36 @@ def dry_wet_mix(dry: AudioBuffer, wet: AudioBuffer, wet_ratio: float) -> AudioBu
         aligned_wet = resample_audio(aligned_wet, dry.sample_rate, target_length=dry.num_samples)
 
     target_ch = max(dry.channels, aligned_wet.channels)
-    dry_m = dry.match_channels(target_ch)
-    wet_m = aligned_wet.match_channels(target_ch)
+    # Do not duplicate full-length buffers when they already have the target layout.
+    # This matters for long recordings and for repeated intensity adjustments.
+    dry_samples = (
+        dry.samples if dry.channels == target_ch else dry.match_channels(target_ch).samples
+    )
+    wet_samples = (
+        aligned_wet.samples
+        if aligned_wet.channels == target_ch
+        else aligned_wet.match_channels(target_ch).samples
+    )
 
     if ratio >= 1.0:
-        return wet_m
+        return AudioBuffer(samples=wet_samples.copy(), sample_rate=dry.sample_rate)
 
-    mixed = (1.0 - ratio) * dry_m.samples + ratio * wet_m.samples
+    # Mezcla por bloques para no crear varias matrices temporales del tamaño
+    # completo de la grabación (que pueden ocupar cientos de MB en audios largos).
+    mixed = np.empty_like(dry_samples, dtype=np.float32)
+    dry_flat = dry_samples.reshape(-1)
+    wet_flat = wet_samples.reshape(-1)
+    mixed_flat = mixed.reshape(-1)
+    chunk_samples = 1_048_576
+    scratch = np.empty(min(chunk_samples, dry_flat.size), dtype=np.float32)
+
+    for start in range(0, dry_flat.size, chunk_samples):
+        end = min(start + chunk_samples, dry_flat.size)
+        scratch_view = scratch[: end - start]
+        np.multiply(dry_flat[start:end], 1.0 - ratio, out=mixed_flat[start:end])
+        np.multiply(wet_flat[start:end], ratio, out=scratch_view)
+        np.add(mixed_flat[start:end], scratch_view, out=mixed_flat[start:end])
+
     return AudioBuffer(samples=mixed, sample_rate=dry.sample_rate)
 
 

@@ -214,6 +214,14 @@ class EnvironmentTab(QWidget):
 
         self._layers_layout.addStretch(1)
 
+    def set_layer_solo_states(self, layers: list[dict[str, Any]]) -> None:
+        """Actualiza los botones Solo sin reconstruir los widgets de cada capa."""
+        for layer in layers:
+            layer_id = str(layer.get("layer_id", ""))
+            widget = self._layer_widgets.get(layer_id)
+            if widget is not None:
+                widget.set_solo_checked(bool(layer.get("solo", False)))
+
     def set_ir_status(self, ir_name: str | None) -> None:
         if ir_name:
             self._ir_status_lbl.setText(f"Modo: Convolución IR ({ir_name})")

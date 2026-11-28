@@ -97,6 +97,22 @@ class PipelineConfig:
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
+    def voice_stage_cache_key(self, source_hash: str) -> str:
+        """Clave del resultado vocal al 100 %, independiente de la intensidad Dry/Wet."""
+        dsp_params = {
+            key: value
+            for key, value in self.advanced_params.items()
+            if not str(key).startswith("model_") and key != "device"
+        }
+        payload = {
+            "source_hash": source_hash,
+            "ai_stage_key": self.ai_stage_cache_key(source_hash),
+            "dsp_params": dsp_params,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
     def full_cache_key(self, source_hash: str) -> str:
         """Clave de caché completa de toda la cadena de procesamiento."""
         payload = {"source_hash": source_hash, "config": self.to_dict()}
