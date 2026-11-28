@@ -174,6 +174,7 @@ class AppController(QObject):
 
         rt = self.restoration_tab
         rt.open_file_requested.connect(self.load_audio_file)
+        rt.clear_audio_requested.connect(self.clear_audio)
         rt.play_original_requested.connect(self._play_original_shortcut)
         rt.model_selected.connect(self._on_model_selected)
         rt.manage_models_requested.connect(self.open_model_manager)
@@ -335,6 +336,34 @@ class AppController(QObject):
         self.preview_player.set_processing_state(False, f"Listo ({meta['filename']})", 1.0)
         self._schedule_preview_render()
 
+    def clear_audio(self) -> None:
+        """Quita el audio de la sesión sin borrar el archivo original del disco."""
+        self._preview_render_timer.stop()
+        # Cancelar también una carga o espectrograma que aún esté en segundo plano.
+        for group in ("preview_render", "audio_load", "spectrogram"):
+            self.job_manager.cancel_group(group)
+
+        self.stop()
+        self._source_path = None
+        self._source_meta = {}
+
+        with self._pb_lock:
+            self._playback.samples_original = None
+            self._playback.samples_processed = None
+            self._playback.samples_a = None
+            self._playback.sample_rate = 48000
+            self._playback.position_frames = 0
+            self._playback.selection_frames = None
+            self._playback.pending_crossfade = False
+            self._playback.last_source_tag = "B"
+            self._playback.playing = False
+
+        self.restoration_tab.set_audio_cleared()
+        self.restoration_tab.waveform.set_audio(None, 0, "")
+        self.restoration_tab.spectrogram.set_spectrogram(None, 0.0, 0)
+        self.preview_player.clear_audio()
+        logger.info("Audio quitado de la sesión.")
+
     def _schedule_preview_render(self) -> None:
         if self._preview_render_timer.isActive():
             self._preview_render_timer.stop()
@@ -362,10 +391,15 @@ class AppController(QObject):
 
     def _apply_rendered_audio(self, rendered: np.ndarray) -> None:
         with self._pb_lock:
+            # Ignora resultados tardíos si el usuario ha eliminado el audio.
+            if self._playback.samples_original is None:
+                return
             self._playback.samples_processed = rendered
         self.preview_player.set_processing_state(False, "Previsualización actualizada", 1.0)
 
     def _on_render_error(self, message: str) -> None:
+        if self._source_path is None:
+            return
         self.preview_player.set_error_state(f"Error de procesamiento: {message}")
 
     def export_pipeline_dict(self, *, include_environment: bool | None = None) -> dict[str, Any]:
@@ -657,14 +691,16 @@ class AppController(QObject):
 
     def _on_advanced_param_changed(self, key: str, value: Any) -> None:
         self._advanced_values[key] = value
-        self._schedule_preview_render()
+        # Igual que Intensidad: agrupa los cambios rápidos y renderiza el último
+        # valor solo cuando el usuario deja de ajustar los controles durante 300 ms.
+        self._request_debounced_preview_render()
 
     def _on_advanced_reset(self) -> None:
         schema = self.model_registry.get_ui_schema_for_model(self._selected_model_id)
         schema += build_dsp_parameter_schema()
         self._advanced_values = {param.key: param.default for param in schema}
         self.restoration_tab.advanced_panel.set_values(self._advanced_values)
-        self._schedule_preview_render()
+        self._request_debounced_preview_render()
 
     def _on_selection_changed(self, start_s: float, end_s: float) -> None:
         with self._pb_lock:
