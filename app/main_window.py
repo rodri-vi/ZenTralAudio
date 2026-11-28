@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -48,6 +49,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} — Restauración IA y Ambientes Acústicos")
         self.resize(1240, 820)
         self.setMinimumSize(980, 680)
+        # Inicia maximizada en Windows y macOS; el usuario puede restaurarla después.
+        self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
 
         central = QWidget()
         root_layout = QVBoxLayout(central)
