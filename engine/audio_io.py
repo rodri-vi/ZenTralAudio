@@ -83,7 +83,7 @@ def _read_soundfile_cancellable(
     file_path: str | Path,
     *,
     cancel_token: CancellationToken | None = None,
-) -> tuple[np.ndarray, sf._SoundFileInfo]:
+) -> tuple[np.ndarray, Any]:
     """Lee audio por bloques para que una carga grande se pueda cancelar."""
     info = sf.info(str(file_path))
     if info.frames <= 0 or info.channels <= 0 or info.samplerate <= 0:
@@ -237,7 +237,7 @@ def load_audio(
             samples, info = _read_soundfile_cancellable(resolved, cancel_token=cancel_token)
             if samples.size == 0:
                 raise AudioFormatUnsupportedError(f"El archivo '{resolved.name}' no contiene audio.")
-            buf = AudioBuffer(samples=samples.T, sample_rate=int(sr))
+            buf = AudioBuffer(samples=samples.T, sample_rate=int(info.samplerate))
             meta = AudioMetadata(
                 file_path=str(resolved),
                 sample_rate=buf.sample_rate,
@@ -311,11 +311,11 @@ def _decode_with_ffmpeg(
                 details=proc.stderr.strip(),
             )
 
-        data, _ = _read_soundfile_cancellable(tmp_wav, cancel_token=cancel_token)
+        data, decoded_info = _read_soundfile_cancellable(tmp_wav, cancel_token=cancel_token)
         if data.size == 0:
             raise AudioFormatUnsupportedError(f"El archivo '{resolved.name}' decodificado está vacío.")
 
-        buf = AudioBuffer(samples=data.T, sample_rate=int(sr))
+        buf = AudioBuffer(samples=data.T, sample_rate=int(decoded_info.samplerate))
         meta = AudioMetadata(
             file_path=str(resolved),
             sample_rate=buf.sample_rate,
