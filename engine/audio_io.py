@@ -89,24 +89,28 @@ def _read_soundfile_cancellable(
     if info.frames <= 0 or info.channels <= 0 or info.samplerate <= 0:
         raise AudioFormatUnsupportedError(f"El archivo '{Path(file_path).name}' no contiene audio válido.")
 
-    chunks: list[np.ndarray] = []
+    samples = np.empty((int(info.frames), int(info.channels)), dtype=np.float32)
+    offset = 0
     with sf.SoundFile(str(file_path), mode="r") as source:
-        remaining = int(info.frames)
-        while remaining > 0:
+        while offset < info.frames:
             if cancel_token:
                 cancel_token.raise_if_cancelled()
-            block = source.read(frames=min(65536, remaining), dtype="float32", always_2d=True)
+            block = source.read(
+                frames=min(65536, int(info.frames) - offset),
+                dtype="float32",
+                always_2d=True,
+            )
             if block.size == 0:
                 break
-            chunks.append(block)
-            remaining -= int(block.shape[0])
+            end = min(int(info.frames), offset + int(block.shape[0]))
+            samples[offset:end] = block[: end - offset]
+            offset = end
 
     if cancel_token:
         cancel_token.raise_if_cancelled()
-    if not chunks:
+    if offset == 0:
         raise AudioFormatUnsupportedError(f"El archivo '{Path(file_path).name}' está vacío.")
-    samples = chunks[0] if len(chunks) == 1 else np.concatenate(chunks, axis=0)
-    return samples, info
+    return samples[:offset], info
 
 
 def _subtype_to_bit_depth(subtype: str | None) -> int | None:
