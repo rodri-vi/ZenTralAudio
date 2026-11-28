@@ -46,7 +46,7 @@ def _build_algorithmic_room_ir_cached(
     room_size: float = 45.0,
     decay_s: float = 1.2,
     damping: float = 45.0,
-) -> AudioBuffer:
+) -> np.ndarray:
     """Genera una respuesta acústica determinista de sala (reflexiones tempranas + cola difusa).
 
     No pretende sustituir una IR real medida, sino ofrecer una simulación geométrica
@@ -98,9 +98,9 @@ def build_algorithmic_room_ir(
     """Obtiene la IR paramétrica desde una caché LRU y devuelve una copia segura."""
     cached = _build_algorithmic_room_ir_cached(
         int(sample_rate),
-        float(room_size),
-        float(decay_s),
-        float(damping),
+        room_size=float(room_size),
+        decay_s=float(decay_s),
+        damping=float(damping),
     )
     return AudioBuffer(samples=cached.copy(), sample_rate=int(sample_rate))
 
