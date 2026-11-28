@@ -57,13 +57,17 @@ class PipelineCache:
         self._lock = threading.Lock()
         self._store: OrderedDict[str, AudioBuffer] = OrderedDict()
 
-    def get(self, key: str) -> AudioBuffer | None:
+    def get(self, key: str, *, copy: bool = True) -> AudioBuffer | None:
         with self._lock:
             item = self._store.get(key)
             if item is None:
                 return None
             self._store.move_to_end(key)
-            return item.copy()
+            if copy:
+                return item.copy()
+            # The cache stores read-only arrays; a shallow AudioBuffer wrapper is safe
+            # for pipeline stages that only consume the samples.
+            return AudioBuffer(samples=item.samples, sample_rate=item.sample_rate)
 
     def put(self, key: str, value: AudioBuffer) -> None:
         size_bytes = int(value.samples.nbytes)
@@ -71,6 +75,7 @@ class PipelineCache:
             return
 
         stored = value.copy()
+        stored.samples.setflags(write=False)
         with self._lock:
             previous = self._store.pop(key, None)
             if previous is not None:
@@ -141,7 +146,7 @@ class ProcessingPipeline:
         # La intensidad solo cambia la mezcla Dry/Wet, nunca vuelve a ejecutar los filtros.
         if config.intensity > 0:
             voice_key = config.voice_stage_cache_key(src_fp)
-            dsp_voice = self._voice_cache.get(voice_key)
+            dsp_voice = self._voice_cache.get(voice_key, copy=False)
             if dsp_voice is None:
                 voice_after_ai = self._run_ai_stage(
                     source,
@@ -167,9 +172,6 @@ class ProcessingPipeline:
             restored_voice = dry_wet_mix(source, dsp_voice, config.intensity / 100.0)
         else:
             restored_voice = source.copy()
-
-        if cancel_token:
-            cancel_token.raise_if_cancelled()
 
         if cancel_token:
             cancel_token.raise_if_cancelled()
