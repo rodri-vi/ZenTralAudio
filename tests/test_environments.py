@@ -18,6 +18,7 @@ from engine.processing_graph import PipelineConfig
 from environments.acoustic_simulator import (
     build_algorithmic_room_ir,
     simulate_acoustic_space,
+    _cached_wet_convolution,
 )
 from environments.ambience_manager import AmbienceManager, ResourceStatus
 from environments.environment_catalog import EnvironmentCatalog
