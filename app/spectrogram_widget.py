@@ -10,6 +10,7 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QImage, QMouseEvent, QPai
 from PySide6.QtWidgets import QWidget
 
 from app.theme import Palette
+from core.job_manager import CancellationToken
 
 
 def _build_spectrogram_lut() -> np.ndarray:
@@ -40,7 +41,13 @@ def _build_spectrogram_lut() -> np.ndarray:
 _LUT = _build_spectrogram_lut()
 
 
-def compute_spectrogram_image(samples: np.ndarray, sample_rate: int, max_cols: int = 900) -> QImage | None:
+def compute_spectrogram_image(
+    samples: np.ndarray,
+    sample_rate: int,
+    max_cols: int = 900,
+    *,
+    cancel_token: CancellationToken | None = None,
+) -> QImage | None:
     """Calcula espectrograma STFT en dB y devuelve QImage listo para pintar."""
     if samples.size < 256 or sample_rate <= 0:
         return None
@@ -59,12 +66,22 @@ def compute_spectrogram_image(samples: np.ndarray, sample_rate: int, max_cols: i
         return None
 
     window = np.hanning(n_fft).astype(np.float32)
-    frames = np.stack([mono[s : s + n_fft] * window for s in starts], axis=0)
-    spectrum = np.abs(np.fft.rfft(frames, axis=1)) / (n_fft * 0.5)
-    db = 20.0 * np.log10(np.maximum(spectrum, 1e-5))
-    norm = np.clip((db + 90.0) / 90.0, 0.0, 1.0)
-    indices = (norm * 255.0).astype(np.uint8)
+    indices = np.empty((starts.size, n_fft // 2 + 1), dtype=np.uint8)
+    # Calcular por bloques permite interrumpir el análisis de grabaciones largas
+    # sin construir de una sola vez una matriz temporal gigantesca.
+    block_frames = 64
+    for block_start in range(0, starts.size, block_frames):
+        if cancel_token:
+            cancel_token.raise_if_cancelled()
+        block_starts = starts[block_start : block_start + block_frames]
+        frames = np.stack([mono[s : s + n_fft] * window for s in block_starts], axis=0)
+        spectrum = np.abs(np.fft.rfft(frames, axis=1)) / (n_fft * 0.5)
+        db = 20.0 * np.log10(np.maximum(spectrum, 1e-5))
+        norm = np.clip((db + 90.0) / 90.0, 0.0, 1.0)
+        indices[block_start : block_start + block_starts.size] = (norm * 255.0).astype(np.uint8)
 
+    if cancel_token:
+        cancel_token.raise_if_cancelled()
     indices_flipped = indices[:, ::-1].T.copy()
     rgba = _LUT[indices_flipped]
     h, w, _ = rgba.shape
