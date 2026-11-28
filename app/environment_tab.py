@@ -92,9 +92,18 @@ class EnvironmentTab(QWidget):
         top_layout.addWidget(QLabel("Ambiente:"))
         top_layout.addWidget(self._env_combo, stretch=1)
         top_layout.addWidget(self._resources_btn)
-        root.addWidget(top_group)
+        # Separador horizontal entre cabecera y espacio de trabajo acústico.
+        self._workspace_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._workspace_splitter.setObjectName("EnvironmentWorkspaceSplitter")
+        self._workspace_splitter.setHandleWidth(8)
+        self._workspace_splitter.setChildrenCollapsible(False)
+        self._workspace_splitter.addWidget(top_group)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._panels_splitter = splitter
+        splitter.setObjectName("AcousticMixerSplitter")
+        splitter.setHandleWidth(8)
+        splitter.setChildrenCollapsible(False)
 
         acoustics_group = QGroupBox("Simulación Acústica (Convolución IR / Algorítmica)")
         ac_layout = QVBoxLayout(acoustics_group)
@@ -187,7 +196,14 @@ class EnvironmentTab(QWidget):
 
         splitter.addWidget(mixer_group)
         splitter.setSizes([480, 520])
-        root.addWidget(splitter, stretch=1)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+
+        self._workspace_splitter.addWidget(splitter)
+        self._workspace_splitter.setStretchFactor(0, 0)
+        self._workspace_splitter.setStretchFactor(1, 1)
+        self._workspace_splitter.setSizes([100, 700])
+        root.addWidget(self._workspace_splitter, stretch=1)
 
     def set_layers(self, layers: list[dict[str, Any]]) -> None:
         while self._layers_layout.count():
