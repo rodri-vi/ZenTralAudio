@@ -112,7 +112,13 @@ class RestorationTab(QWidget):
         file_layout.addWidget(self._vis_splitter, stretch=1)
         self._update_visualizer_mode()
 
-        root.addWidget(file_group, stretch=2)
+        # Divisores arrastrables estilo DAW: entrada, controles principales y
+        # opciones avanzadas pueden ocupar el espacio que el usuario necesite.
+        self._workspace_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._workspace_splitter.setObjectName("RestorationWorkspaceSplitter")
+        self._workspace_splitter.setHandleWidth(8)
+        self._workspace_splitter.setChildrenCollapsible(False)
+        self._workspace_splitter.addWidget(file_group)
 
         controls_frame = QFrame()
         controls_frame.setObjectName("PanelPrimary")
@@ -203,14 +209,19 @@ class RestorationTab(QWidget):
         intensity_row.addWidget(self._adv_toggle_btn)
         controls_layout.addLayout(intensity_row)
 
-        root.addWidget(controls_frame)
+        self._workspace_splitter.addWidget(controls_frame)
 
         self.advanced_panel = DynamicParamPanel()
         self.advanced_panel.setVisible(False)
         self.advanced_panel.setMinimumHeight(0)
         self.advanced_panel.parameter_changed.connect(self.advanced_param_changed.emit)
         self.advanced_panel.reset_requested.connect(self.advanced_reset_requested.emit)
-        root.addWidget(self.advanced_panel, stretch=2)
+        self._workspace_splitter.addWidget(self.advanced_panel)
+        self._workspace_splitter.setStretchFactor(0, 2)
+        self._workspace_splitter.setStretchFactor(1, 1)
+        self._workspace_splitter.setStretchFactor(2, 3)
+        self._workspace_splitter.setSizes([560, 300, 0])
+        root.addWidget(self._workspace_splitter, stretch=1)
 
     def set_models_list(self, models: list[dict[str, Any]], selected_id: str | None = None) -> None:
         self._model_combo.blockSignals(True)
@@ -348,13 +359,11 @@ class RestorationTab(QWidget):
     def _on_advanced_toggled(self, checked: bool) -> None:
         self.advanced_panel.setVisible(checked)
         if checked:
-            # Reserva aproximadamente tres cuartas partes del espacio útil al
-            # panel avanzado, dejando una franja superior para el audio cargado.
-            self.advanced_panel.setMinimumHeight(280)
-            self.layout().setStretch(0, 1)
-            self.layout().setStretch(2, 3)
+            # La sección avanzada aparece con espacio generoso, pero el usuario
+            # puede arrastrar los dos divisores y guardar su propia distribución.
+            self.advanced_panel.setMinimumHeight(240)
+            self._workspace_splitter.setSizes([300, 220, 520])
         else:
             self.advanced_panel.setMinimumHeight(0)
-            self.layout().setStretch(0, 2)
-            self.layout().setStretch(2, 2)
+            self._workspace_splitter.setSizes([560, 300, 0])
         self._adv_toggle_btn.setText("OPCIONES AVANZADAS ^" if checked else "OPCIONES AVANZADAS v")
