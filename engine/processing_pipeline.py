@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
@@ -41,6 +42,34 @@ def fingerprint_audio(buffer: AudioBuffer) -> str:
         step = max(1, arr.shape[1] // 16384)
         h.update(np.ascontiguousarray(arr[:, ::step]).tobytes())
     return h.hexdigest()[:24]
+
+
+def physical_memory_bytes() -> int:
+    """RAM física del equipo (8 GiB si no se puede determinar)."""
+    try:
+        return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+    except (AttributeError, OSError, ValueError):
+        return 8 * 1024**3
+
+
+def default_cache_budget_bytes() -> int:
+    """Presupuesto total de cachés: 25 % de la RAM, entre 768 MB y 4 GB."""
+    return int(min(4 * 1024**3, max(768 * 1024**2, physical_memory_bytes() * 0.25)))
+
+
+def is_dual_mono(samples: np.ndarray, *, tolerance: float = 1e-6) -> bool:
+    """True si todos los canales son (prácticamente) idénticos al primero."""
+    if samples.ndim != 2 or samples.shape[0] < 2 or samples.shape[1] == 0:
+        return False
+    reference = samples[0]
+    # Comparación por bloques: sale en cuanto encuentra una diferencia y no crea
+    # una matriz temporal del tamaño completo de la grabación.
+    block = 262_144
+    for channel in samples[1:]:
+        for start in range(0, reference.shape[0], block):
+            if np.max(np.abs(channel[start : start + block] - reference[start : start + block])) > tolerance:
+                return False
+    return True
 
 
 class PipelineCache:
@@ -106,12 +135,21 @@ class PipelineCache:
 class ProcessingPipeline:
     """Ejecuta de forma coherente IA -> DSP -> Dry/Wet -> Ambiente -> Limitador."""
 
-    def __init__(self) -> None:
-        # La caché por bytes evita que varias grabaciones largas disparen el consumo de RAM.
-        cache_limit = 768 * 1024 * 1024
-        self._ai_cache = PipelineCache(max_entries=2, max_bytes=cache_limit)
-        self._voice_cache = PipelineCache(max_entries=1, max_bytes=cache_limit)
-        self._full_cache = PipelineCache(max_entries=2, max_bytes=128 * 1024 * 1024)
+    def __init__(self, memory_budget_bytes: int | None = None) -> None:
+        # Todas las cachés de audio comparten un presupuesto proporcional a la RAM
+        # (25 %: ~2 GB en un Mac de 8 GB), para no forzar el uso de swap.
+        budget = int(memory_budget_bytes or default_cache_budget_bytes())
+        self.memory_budget_bytes = budget
+        self._ai_cache = PipelineCache(max_entries=2, max_bytes=int(budget * 0.30))
+        self._voice_cache = PipelineCache(max_entries=1, max_bytes=int(budget * 0.25))
+        self._full_cache = PipelineCache(max_entries=2, max_bytes=int(budget * 0.10))
+        try:
+            from environments.acoustic_simulator import configure_acoustic_cache_budget
+
+            # Húmeda y directa: 35 % entre las dos.
+            configure_acoustic_cache_budget(int(budget * 0.175))
+        except ImportError:
+            pass
 
     def clear_cache(self) -> None:
         self._ai_cache.clear()
@@ -182,11 +220,19 @@ class ProcessingPipeline:
             elif progress_cb:
                 progress_cb(0.55, "Reutilizando voz procesada; ajustando mezcla Dry/Wet...")
 
-            restored_voice = dry_wet_mix(source, dsp_voice, config.intensity / 100.0)
+            ratio = config.intensity / 100.0
+            restored_voice = dry_wet_mix(source, dsp_voice, ratio)
             voice_token = f"{voice_key}:{config.intensity}"
+            # La voz restaurada es (1-k)·original + k·procesada: el ambiente reutiliza
+            # la convolución de cada parte y la intensidad no obliga a recalcularla.
+            voice_components = [
+                (source, f"source:{src_fp}", 1.0 - ratio),
+                (dsp_voice, f"voice:{voice_key}", ratio),
+            ]
         else:
             restored_voice = source.copy()
             voice_token = f"source:{src_fp}"
+            voice_components = [(source, voice_token, 1.0)]
 
         if cancel_token:
             cancel_token.raise_if_cancelled()
@@ -201,6 +247,7 @@ class ProcessingPipeline:
                 paths=app_paths,
                 cancel_token=cancel_token,
                 voice_token=voice_token,
+                voice_components=voice_components,
             )
         else:
             final_mix = restored_voice
@@ -213,6 +260,80 @@ class ProcessingPipeline:
         if progress_cb:
             progress_cb(1.0, "Procesamiento completado")
         return safe_out
+
+    def render_preview_window(
+        self,
+        source: AudioBuffer,
+        config: PipelineConfig,
+        start: int,
+        end: int,
+        *,
+        paths: AppPaths | None = None,
+        cancel_token: CancellationToken | None = None,
+    ) -> np.ndarray | None:
+        """Render rápido y aproximado de ``[start, end)`` para escuchar un cambio al instante.
+
+        Solo merece la pena cuando hay que recalcular la cadena DSP vocal de una
+        grabación larga. Reutiliza el resultado de IA ya cacheado del archivo
+        completo y procesa únicamente el fragmento (con margen previo para que
+        filtros y reverberación se asienten). La reducción de ruido estima el
+        perfil de ruido con el fragmento, así que puede diferir ligeramente del
+        render completo, que lo sustituye en cuanto termina.
+
+        Devuelve ``None`` si no aporta nada (el render completo será rápido o la
+        IA aún no está calculada). Nunca escribe en las cachés.
+        """
+        config.validate()
+        if config.intensity <= 0:
+            return None
+        sr = source.sample_rate
+        total = source.num_samples
+        start = max(0, min(total, int(start)))
+        end = max(start, min(total, int(end)))
+        if end - start < sr:
+            return None
+
+        src_fp = fingerprint_audio(source)
+        if self._full_cache.get(config.full_cache_key(src_fp), copy=False) is not None:
+            return None
+        if self._voice_cache.get(config.voice_stage_cache_key(src_fp), copy=False) is not None:
+            return None
+
+        ai_full: AudioBuffer | None = None
+        if config.ai_enabled:
+            ai_full = self._ai_cache.get(config.ai_stage_cache_key(src_fp), copy=False)
+            if ai_full is None:
+                try:
+                    from models.model_registry import get_global_registry
+
+                    adapter = get_global_registry(paths or AppPaths.detect()).get_adapter(config.model_id)
+                    if adapter is not None and adapter.is_ready_for_inference():
+                        return None  # la IA debe procesar el archivo completo primero
+                except ImportError:
+                    pass
+
+        pre_roll = int(sr * (8.0 if config.environment_enabled else 2.0))
+        a = max(0, start - pre_roll)
+        segment = AudioBuffer(samples=source.samples[:, a:end], sample_rate=sr)
+        voice_in = (
+            AudioBuffer(samples=ai_full.samples[:, a:end], sample_rate=sr) if ai_full is not None else segment
+        )
+        if cancel_token:
+            cancel_token.raise_if_cancelled()
+        dsp_segment = self._run_dsp_stage(voice_in, config)
+        restored = dry_wet_mix(segment, dsp_segment, config.intensity / 100.0)
+        if cancel_token:
+            cancel_token.raise_if_cancelled()
+        if config.environment_enabled:
+            restored = self._run_environment_stage(
+                restored,
+                config,
+                paths=paths or AppPaths.detect(),
+                cancel_token=cancel_token,
+                cacheable=False,
+            )
+        safe = apply_safety_limiter(restored, ceiling_db=config.true_peak_ceiling_db)
+        return np.ascontiguousarray(safe.samples[:, start - a : end - a], dtype=np.float32)
 
     def _run_ai_stage(
         self,
@@ -254,12 +375,25 @@ class ProcessingPipeline:
         model_params = {
             k: v for k, v in config.advanced_params.items() if str(k).startswith("model_")
         }
+        # Muchas voces llegan como "estéreo" con ambos canales idénticos. En ese caso
+        # se procesa un solo canal y se duplica: mitad de tiempo y resultado idéntico.
+        dual_mono = is_dual_mono(work_buf.samples)
+        model_input = (
+            AudioBuffer(samples=work_buf.samples[:1], sample_rate=work_buf.sample_rate)
+            if dual_mono
+            else work_buf
+        )
         processed = adapter.process(
-            work_buf,
+            model_input,
             model_params,
             progress_cb=progress_cb,
             cancel_token=cancel_token,
         )
+        if dual_mono:
+            mono = processed.samples[:1]
+            processed = AudioBuffer(
+                samples=np.repeat(mono, work_buf.channels, axis=0), sample_rate=processed.sample_rate
+            )
         if processed.sample_rate != source.sample_rate or processed.num_samples != source.num_samples:
             processed = resample_audio(processed, source.sample_rate, target_length=source.num_samples)
 
@@ -326,6 +460,8 @@ class ProcessingPipeline:
         paths: AppPaths,
         cancel_token: CancellationToken | None,
         voice_token: str | None = None,
+        voice_components: list[tuple[AudioBuffer, str, float]] | None = None,
+        cacheable: bool = True,
     ) -> AudioBuffer:
         try:
             from environments.environment_engine import apply_environment_stage  # type: ignore[import-not-found]
@@ -336,6 +472,8 @@ class ProcessingPipeline:
                 paths=paths,
                 cancel_token=cancel_token,
                 voice_token=voice_token,
+                voice_components=voice_components,
+                cacheable=cacheable,
             )
         except ImportError:
             pass

@@ -27,6 +27,8 @@ def apply_environment_stage(
     paths: AppPaths,
     cancel_token: CancellationToken | None = None,
     voice_token: str | None = None,
+    voice_components: list[tuple[AudioBuffer, str, float]] | None = None,
+    cacheable: bool = True,
 ) -> AudioBuffer:
     """Aplica simulación acústica (IR o algorítmica) y mezcla las capas ambientales activas.
 
@@ -62,7 +64,12 @@ def apply_environment_stage(
         cancel_token.raise_if_cancelled()
 
     spatial_voice = simulate_acoustic_space(
-        voice, ir_buffer=ir_buffer, acoustics=acoustics, cache_token=voice_token
+        voice,
+        ir_buffer=ir_buffer,
+        acoustics=acoustics,
+        cache_token=voice_token,
+        components=voice_components,
+        cacheable=cacheable,
     )
 
     # 2. Cargar y mezclar capas ambientales con archivo local o recurso disponible

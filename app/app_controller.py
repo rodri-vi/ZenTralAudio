@@ -25,13 +25,18 @@ from app.widgets.dynamic_param_panel import UIParamDefinition
 from core.configuration import ConfigManager
 from core.exceptions import ZenTralAudioError
 from core.job_manager import JobContext, JobManager
+from core.macos_audio import default_output_device_id
 from core.paths import AppPaths
 from core.validation import validate_audio_input_path
 from engine.audio_io import load_audio
 from engine.export_engine import export_with_pipeline
-from engine.preview_engine import get_shared_pipeline, render_preview_from_state
-from engine.playback_utils import calculate_loudness_compensation
-from environments.ambience_manager import AmbienceManager, list_all_managed_resources
+from engine.playback_utils import calculate_loudness_compensation, splice_with_crossfade
+from engine.preview_engine import (
+    get_shared_pipeline,
+    render_preview_from_state,
+    render_preview_window_from_state,
+)
+from environments.ambience_manager import AmbienceManager
 from environments.environment_presets import build_environment_ui_state
 from models.model_registry import get_global_registry
 from presets.preset_manager import PresetManager
@@ -42,6 +47,9 @@ logger = logging.getLogger("zentralaudio.controller")
 PLAYBACK_LATENCY_S = 0.1
 PLAYBACK_BLOCKSIZE = 1024
 CROSSFADE_FRAMES = 512
+# Previsualización progresiva: solo en audios largos, con ventanas de 20 s.
+PROGRESSIVE_MIN_SECONDS = 60
+PROGRESSIVE_WINDOW_SECONDS = 20
 _FADE_CACHE: dict[int, np.ndarray] = {}
 
 
@@ -160,10 +168,18 @@ class AppController(QObject):
         self._pb_lock = threading.Lock()
         self._sd_stream: Any = None
         self._render_generation = 0
+        self._applied_full_generation = -1
 
         self._ui_timer = QTimer(self)
         self._ui_timer.setInterval(33)
         self._ui_timer.timeout.connect(self._on_playback_tick)
+
+        # Vigila cambios de dispositivo de salida (AirPods, interfaces USB...) y
+        # streams que CoreAudio ha cerrado al desconectar el dispositivo.
+        self._device_watch_timer = QTimer(self)
+        self._device_watch_timer.setInterval(1000)
+        self._device_watch_timer.timeout.connect(self._check_output_device)
+        self._stream_default_device: int | None = None
 
         # Agrupa cambios rápidos de intensidad, acústica y mezcla ambiental.
         # Los valores UI cambian al instante; el audio solo se vuelve a renderizar
@@ -342,6 +358,9 @@ class AppController(QObject):
         # audio y debe recrearse si el nuevo archivo usa otra (si no, sonaría a
         # velocidad y tono incorrectos).
         self.stop()
+        # Las cachés del archivo anterior ya no sirven: liberarlas antes de que el
+        # nuevo audio empiece a ocupar memoria.
+        get_shared_pipeline().clear_cache()
 
         with self._pb_lock:
             self._playback.playing = False
@@ -395,6 +414,7 @@ class AppController(QObject):
         self.stop()
         self._source_path = None
         self._source_meta = {}
+        get_shared_pipeline().clear_cache()
 
         with self._pb_lock:
             self._playback.samples_original = None
@@ -431,6 +451,7 @@ class AppController(QObject):
         self._render_generation += 1
         generation = self._render_generation
         self._sig_job_progress.emit(True, "Renderizando previsualización...", 0.05)
+        self._submit_preview_window(original, sr, state_snapshot, generation)
         self.job_manager.submit(
             "preview_render",
             lambda ctx: (
@@ -447,12 +468,62 @@ class AppController(QObject):
             on_cancelled=lambda: self._sig_job_progress.emit(False, "Procesamiento cancelado", 0.0),
         )
 
-    def _apply_rendered_audio(self, result: tuple[int, np.ndarray] | np.ndarray) -> None:
+    def _submit_preview_window(
+        self, original: np.ndarray, sr: int, state: dict[str, Any], generation: int
+    ) -> None:
+        """Previsualización progresiva para grabaciones largas.
+
+        Antes del render completo se procesan ~20 s alrededor del cursor y se
+        empalman (con fundidos) en el buffer que está sonando, de modo que el
+        cambio se oye en un segundo aunque el archivo dure muchos minutos.
+        """
+        if original.shape[1] < PROGRESSIVE_MIN_SECONDS * sr:
+            return
+        with self._pb_lock:
+            pb = self._playback
+            anchor = pb.position_frames
+            if not pb.playing and pb.selection_frames is not None:
+                anchor = pb.selection_frames[0]
+        start = max(0, int(anchor))
+        end = min(original.shape[1], start + int(PROGRESSIVE_WINDOW_SECONDS * sr))
+
+        def _job(ctx: JobContext) -> tuple[int, np.ndarray, str] | None:
+            if self._applied_full_generation == generation or self._render_generation != generation:
+                return None  # el render completo ya terminó o hay una petición más nueva
+            window = render_preview_window_from_state(original, sr, state, self.paths, start, end, ctx)
+            if window is None:
+                return None
+            with self._pb_lock:
+                base = self._playback.samples_processed
+                if self._playback.samples_original is not original:
+                    return None
+            if base is None or base.shape != original.shape:
+                base = original
+            return generation, splice_with_crossfade(base, window, start, int(0.01 * sr)), "window"
+
+        self.job_manager.submit(
+            "preview_window",
+            _job,
+            group_key="preview_window",
+            resource_key="pipeline_compute",
+            on_completed=lambda out: self._sig_render_ready.emit(out) if out is not None else None,
+            on_failed=lambda exc: logger.debug("Previsualización rápida no disponible: %s", exc),
+        )
+
+    def _apply_rendered_audio(
+        self, result: tuple[int, np.ndarray] | tuple[int, np.ndarray, str] | np.ndarray
+    ) -> None:
+        is_window = False
         if isinstance(result, tuple):
-            generation, rendered = result
+            generation, rendered = result[0], result[1]
+            is_window = len(result) > 2 and result[2] == "window"
             if generation != self._render_generation:
                 logger.debug("Descartado render obsoleto (generación %s)", generation)
                 return
+            if is_window and self._applied_full_generation == generation:
+                return  # el render completo ya llegó; el aproximado sobra
+            if not is_window:
+                self._applied_full_generation = generation
         else:
             rendered = result
         with self._pb_lock:
@@ -480,7 +551,12 @@ class AppController(QObject):
                 self._playback.swap_tag = "B"
             self._playback.samples_processed = rendered
             self._playback.gain_comp_processed = gain_comp
-        self.preview_player.set_processing_state(False, "Previsualización actualizada", 1.0)
+        if is_window:
+            self.preview_player.set_processing_state(
+                True, "Previsualización rápida aplicada; completando el resto...", 0.5
+            )
+        else:
+            self.preview_player.set_processing_state(False, "Previsualización actualizada", 1.0)
 
     def _on_render_error(self, message: str) -> None:
         if self._source_path is None:
@@ -545,6 +621,50 @@ class AppController(QObject):
             pass
         logger.warning("Dispositivo de salida %s no disponible; usando el predeterminado.", index)
         return None
+
+    def _check_output_device(self) -> None:
+        """Reabre la salida si cambió el dispositivo predeterminado o el stream murió."""
+        stream = self._sd_stream
+        if stream is None:
+            self._device_watch_timer.stop()
+            return
+        try:
+            active = bool(stream.active)
+        except Exception:
+            active = False
+        reason: str | None = None
+        if not active:
+            reason = "el stream de salida se detuvo (¿dispositivo desconectado?)"
+        elif self.config_manager.settings.output_device_index is None:
+            current = default_output_device_id()
+            previous = self._stream_default_device
+            if current is not None and previous is not None and current != previous:
+                reason = "cambió el dispositivo de salida predeterminado"
+        if reason is None:
+            return
+        self.reopen_output_stream(reason)
+
+    def reopen_output_stream(self, reason: str) -> None:
+        """Vuelve a abrir la salida conservando la posición y el estado de reproducción."""
+        import sounddevice as sd
+
+        with self._pb_lock:
+            sample_rate = self._playback.sample_rate
+        logger.info("Reabriendo la salida de audio: %s", reason)
+        self._close_output_stream()
+        try:
+            # PortAudio solo enumera dispositivos al inicializarse.
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            logger.debug("No se pudo reinicializar PortAudio", exc_info=True)
+        try:
+            self._ensure_output_stream(sample_rate)
+        except Exception as exc:
+            with self._pb_lock:
+                self._playback.playing = False
+            logger.exception("No se pudo reabrir la salida de audio")
+            self.preview_player.set_error_state(f"Salida de audio no disponible: {exc}")
 
     def _close_output_stream(self) -> None:
         stream, self._sd_stream = self._sd_stream, None
@@ -611,6 +731,10 @@ class AppController(QObject):
             self._sd_stream = new_stream
             with self._pb_lock:
                 self._playback.output_latency_s = float(new_stream.latency or 0.0)
+            self._stream_default_device = default_output_device_id()
+            watch = getattr(self, "_device_watch_timer", None)
+            if watch is not None and not watch.isActive():
+                watch.start()
             logger.info(
                 "Salida de audio abierta: dispositivo=%s, %d Hz, bloque=%s, latencia=%.1f ms",
                 device if device is not None else "predeterminado",

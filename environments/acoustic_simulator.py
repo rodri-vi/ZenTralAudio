@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
@@ -107,22 +108,68 @@ def build_algorithmic_room_ir(
     return AudioBuffer(samples=cached.copy(), sample_rate=int(sample_rate))
 
 
-_WET_CACHE_LOCK = threading.Lock()
-_WET_CACHE_KEY: str | None = None
-_WET_CACHE_VALUE: np.ndarray | None = None
-_DIRECT_CACHE_KEY: str | None = None
-_DIRECT_CACHE_VALUE: np.ndarray | None = None
+class _ArrayLRU:
+    """Caché LRU de arrays de solo lectura acotada por número de entradas y bytes.
+
+    Siempre conserva al menos la entrada más reciente, aunque supere el
+    presupuesto, para no perder la reutilización en grabaciones muy largas.
+    """
+
+    def __init__(self, max_entries: int, max_bytes: int) -> None:
+        self.max_entries = max(1, int(max_entries))
+        self.max_bytes = max(0, int(max_bytes))
+        self._store: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> np.ndarray | None:
+        with self._lock:
+            value = self._store.get(key)
+            if value is not None:
+                self._store.move_to_end(key)
+            return value
+
+    def put(self, key: str, value: np.ndarray) -> None:
+        value.setflags(write=False)
+        with self._lock:
+            self._store.pop(key, None)
+            self._store[key] = value
+            total = sum(int(v.nbytes) for v in self._store.values())
+            while len(self._store) > 1 and (
+                len(self._store) > self.max_entries or total > self.max_bytes
+            ):
+                _, oldest = self._store.popitem(last=False)
+                total -= int(oldest.nbytes)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()
+
+    @property
+    def nbytes(self) -> int:
+        with self._lock:
+            return sum(int(v.nbytes) for v in self._store.values())
+
+
+# Dos entradas: la voz original y la procesada (ver ``components`` más abajo).
+_WET_CACHE = _ArrayLRU(max_entries=2, max_bytes=512 * 1024 * 1024)
+_DIRECT_CACHE = _ArrayLRU(max_entries=2, max_bytes=512 * 1024 * 1024)
 _CONVOLUTION_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ZenTralConv")
+
+
+def configure_acoustic_cache_budget(max_bytes: int) -> None:
+    """Ajusta el presupuesto de memoria de las cachés acústicas (por caché)."""
+    _WET_CACHE.max_bytes = max(0, int(max_bytes))
+    _DIRECT_CACHE.max_bytes = max(0, int(max_bytes))
+
+
+def acoustic_cache_bytes() -> int:
+    return _WET_CACHE.nbytes + _DIRECT_CACHE.nbytes
 
 
 def clear_acoustic_caches() -> None:
     """Libera las señales húmeda y directa retenidas para reutilización."""
-    global _WET_CACHE_KEY, _WET_CACHE_VALUE, _DIRECT_CACHE_KEY, _DIRECT_CACHE_VALUE
-    with _WET_CACHE_LOCK:
-        _WET_CACHE_KEY = None
-        _WET_CACHE_VALUE = None
-        _DIRECT_CACHE_KEY = None
-        _DIRECT_CACHE_VALUE = None
+    _WET_CACHE.clear()
+    _DIRECT_CACHE.clear()
 
 
 def _readonly(array: np.ndarray) -> np.ndarray:
@@ -135,18 +182,19 @@ def _cached_wet_convolution(
     ir_key: str,
     audio: np.ndarray,
     impulse: np.ndarray,
+    *,
+    cacheable: bool = True,
 ) -> np.ndarray:
-    """Reutiliza un único wet render sin retener copias de los WAV como claves LRU.
+    """Convolución IR reutilizable sin retener copias de los WAV como claves.
 
     Devuelve un array de solo lectura compartido con la caché: los consumidores
     deben crear nuevos arrays en lugar de modificarlo (se fuerza con ``write=False``).
     Los dos canales se convolucionan en paralelo; la FFT de SciPy libera el GIL.
     """
-    global _WET_CACHE_KEY, _WET_CACHE_VALUE
     key = f"{audio_key}:{ir_key}:{audio.shape}:{impulse.shape}"
-    with _WET_CACHE_LOCK:
-        if _WET_CACHE_KEY == key and _WET_CACHE_VALUE is not None:
-            return _WET_CACHE_VALUE
+    cached = _WET_CACHE.get(key)
+    if cached is not None:
+        return cached
 
     n = audio.shape[1]
     channels = audio.shape[0]
@@ -158,28 +206,24 @@ def _cached_wet_convolution(
     out = np.empty((channels, n), dtype=np.float32)
     for channel, result in enumerate(_CONVOLUTION_POOL.map(convolve_channel, range(channels))):
         out[channel] = result
-
-    _readonly(out)
-    with _WET_CACHE_LOCK:
-        _WET_CACHE_KEY = key
-        _WET_CACHE_VALUE = out
+    if cacheable:
+        _WET_CACHE.put(key, out)
     return out
 
 
-def _cached_direct_damping(token: str, samples: np.ndarray, sample_rate: int, damping_pct: float) -> np.ndarray:
+def _cached_direct_damping(
+    token: str, samples: np.ndarray, sample_rate: int, damping_pct: float, *, cacheable: bool = True
+) -> np.ndarray:
     """Absorción aérea de la voz directa; solo depende de la voz y de la distancia."""
-    global _DIRECT_CACHE_KEY, _DIRECT_CACHE_VALUE
     key = f"{token}:{samples.shape}:{sample_rate}:{damping_pct:.6f}"
-    with _WET_CACHE_LOCK:
-        if _DIRECT_CACHE_KEY == key and _DIRECT_CACHE_VALUE is not None:
-            return _DIRECT_CACHE_VALUE
+    cached = _DIRECT_CACHE.get(key)
+    if cached is not None:
+        return cached
     damped = _apply_air_damping(samples, sample_rate, damping_pct)
     if damped is samples:
         return samples
-    _readonly(damped)
-    with _WET_CACHE_LOCK:
-        _DIRECT_CACHE_KEY = key
-        _DIRECT_CACHE_VALUE = damped
+    if cacheable:
+        _DIRECT_CACHE.put(key, damped)
     return damped
 
 
@@ -194,6 +238,8 @@ def simulate_acoustic_space(
     ir_buffer: AudioBuffer | None,
     acoustics: dict[str, float],
     cache_token: str | None = None,
+    components: list[tuple[AudioBuffer, str, float]] | None = None,
+    cacheable: bool = True,
 ) -> AudioBuffer:
     """Aplica convolución IR o simulación algorítmica más distancia aparente, anchura y pan.
 
@@ -202,6 +248,11 @@ def simulate_acoustic_space(
     calcula un hash del contenido. Con él se reutilizan la señal húmeda (la
     convolución, la parte cara) y la voz directa filtrada cuando solo cambian
     mezcla, niveles, predelay, anchura o panorámica.
+
+    ``components`` describe ``voice`` como combinación lineal ``Σ peso·señal``
+    (p. ej. original y voz procesada según la intensidad). Como la convolución y
+    el filtrado son lineales, se reutilizan sus resultados por separado y un
+    cambio de intensidad ya no requiere volver a convolucionar.
     """
     sr = voice.sample_rate
     room_size = float(acoustics.get("room_size", 45.0))
@@ -215,17 +266,40 @@ def simulate_acoustic_space(
     distance = max(0.0, min(1.0, float(acoustics.get("apparent_distance", 20.0)) / 100.0))
     pan = max(-1.0, min(1.0, float(acoustics.get("pan", 0.0)) / 100.0))
 
-    # Convertir voz a estéreo para imagen espacial consistente
-    voice_st = voice.to_stereo()
-    voice_samples = np.ascontiguousarray(voice_st.samples, dtype=np.float32)
-    n = voice_samples.shape[1]
-    token = cache_token or _content_key(voice_samples)
+    # Convertir voz a estéreo para imagen espacial consistente. Cada parte es
+    # (muestras estéreo, clave de caché, peso).
+    if components:
+        parts = [
+            (np.ascontiguousarray(buf.to_stereo().samples, dtype=np.float32), key, float(weight))
+            for buf, key, weight in components
+            if abs(float(weight)) > 1e-9
+        ]
+    else:
+        voice_samples = np.ascontiguousarray(voice.to_stereo().samples, dtype=np.float32)
+        parts = [(voice_samples, cache_token or ("nocache" if not cacheable else _content_key(voice_samples)), 1.0)]
+    n = parts[0][0].shape[1] if parts else voice.num_samples
+
+    def _weighted_sum(arrays: list[tuple[np.ndarray, float]]) -> np.ndarray:
+        total = np.multiply(arrays[0][0], np.float32(arrays[0][1]), dtype=np.float32)
+        for array, weight in arrays[1:]:
+            total += array * np.float32(weight)
+        return total
 
     # Simulación de absorción aérea en voz directa según distancia aparente
     if distance > 0.05:
-        direct_sig = _cached_direct_damping(token, voice_samples, sr, distance * 65.0)
+        direct_parts = [
+            (_cached_direct_damping(key, samples, sr, distance * 65.0, cacheable=cacheable), weight)
+            for samples, key, weight in parts
+        ]
     else:
-        direct_sig = voice_samples
+        direct_parts = [(samples, weight) for samples, _key, weight in parts]
+    if not direct_parts:
+        return AudioBuffer(samples=np.zeros((2, n), dtype=np.float32), sample_rate=sr)
+    direct_sig = (
+        direct_parts[0][0]
+        if len(direct_parts) == 1 and direct_parts[0][1] == 1.0
+        else _weighted_sum(direct_parts)
+    )
 
     # Nivel efectivo directo vs reflejado ajustado por distancia aparente
     eff_direct = direct_level * (1.0 - 0.45 * distance)
@@ -245,7 +319,12 @@ def simulate_acoustic_space(
 
     # Overlap-add es más eficiente que una FFT global para voz larga + IR de varios segundos.
     ir_contiguous = np.ascontiguousarray(ir_samples, dtype=np.float32)
-    wet = _cached_wet_convolution(token, _content_key(ir_contiguous), voice_samples, ir_contiguous)
+    ir_key = _content_key(ir_contiguous)
+    wet_parts = [
+        (_cached_wet_convolution(key, ir_key, samples, ir_contiguous, cacheable=cacheable), weight)
+        for samples, key, weight in parts
+    ]
+    wet = wet_parts[0][0] if len(wet_parts) == 1 and wet_parts[0][1] == 1.0 else _weighted_sum(wet_parts)
 
     # Mezcla dry/wet equivalente a dry_wet_mix(directo, húmedo con predelay) seguida de
     # la compensación de nivel, calculada en un único array de salida.
