@@ -140,7 +140,7 @@ class VoiceFixerAdapter(BaseModelAdapter):
 
         mode = int(params.get("model_vf_mode", 0))
         iso_py = find_isolated_python(self.manager.model_dir(self.MODEL_ID))
-        worker = Path(__file__).resolve().parent / "isolated_runners" / "worker_entry.py"
+        worker = Path(__file__).resolve().parent / "worker_entry.py"
 
         import torch
 

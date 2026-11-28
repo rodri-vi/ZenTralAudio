@@ -35,14 +35,29 @@ def find_bundled_worker(model_dir: Path) -> Path | None:
     return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
+SHARED_RUNTIME_DIRNAME = "ai-python"
+
+
+def shared_runtime_python(data_root: Path) -> Path:
+    """Intérprete del runtime IA compartido (clearvoice + voicefixer) de la raíz de datos."""
+    base = data_root / "runtimes" / SHARED_RUNTIME_DIRNAME
+    return base / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
 def find_isolated_python(model_dir: Path) -> Path | None:
-    """Busca primero el worker incluido y, después, un .venv aislado de desarrollo."""
+    """Busca el worker incluido, un .venv por modelo o el runtime IA compartido.
+
+    El runtime compartido (``<datos>/runtimes/ai-python``) evita instalar
+    clearvoice/voicefixer en el entorno principal: sus dependencias (streamlit,
+    opencv, soundfile 0.12...) chocan con las de la aplicación.
+    """
     bundled = find_bundled_worker(model_dir)
     if bundled is not None:
         return bundled
     candidates = (
         model_dir / ".venv" / "Scripts" / "python.exe",
         model_dir / ".venv" / "bin" / "python",
+        shared_runtime_python(model_dir.resolve().parent.parent),
     )
     return next((candidate for candidate in candidates if candidate.is_file()), None)
 
@@ -65,6 +80,8 @@ def _portable_worker_environment(weights_dir: Path) -> dict[str, str]:
             "TRANSFORMERS_OFFLINE": "1",
             "HF_HUB_DISABLE_TELEMETRY": "1",
             "HF_HUB_ENABLE_HF_TRANSFER": "0",
+            # Apple Silicon: ejecutar en CPU las operaciones sin kernel MPS.
+            "PYTORCH_ENABLE_MPS_FALLBACK": "1",
         }
     )
     return env
@@ -119,8 +136,9 @@ def run_in_isolated_subprocess(
             if bundled_worker
             else [str(python_exe), str(worker_script), str(req_json)]
         )
-        if bundled_worker:
-            kwargs["env"] = _portable_worker_environment(weights_dir)
+        # Tanto el worker empaquetado como los runtimes Python aislados se ejecutan
+        # sin red y con HOME/cachés dentro de la carpeta de datos de la app.
+        kwargs["env"] = _portable_worker_environment(weights_dir)
         if os.name == "nt":
             kwargs["creationflags"] = _CREATE_NO_WINDOW
 
