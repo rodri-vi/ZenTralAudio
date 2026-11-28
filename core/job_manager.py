@@ -133,6 +133,7 @@ class JobManager:
         on_cancelled: Callable[[], None] | None = None,
     ) -> JobHandle[T]:
         """Envía una tarea al pool en segundo plano sin bloquear el hilo principal."""
+        previous_to_cancel: JobHandle[Any] | None = None
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("No se pueden enviar tareas: JobManager está cerrado.")
@@ -141,7 +142,10 @@ class JobManager:
                 previous = self._group_latest.get(group_key)
                 if previous is not None and previous.status in (JobStatus.PENDING, JobStatus.RUNNING):
                     logger.debug("Cancelando tarea obsoleta '%s' (%s)", previous.name, previous.job_id)
-                    previous.cancel()
+                    # Future.cancel() puede ejecutar sus callbacks inmediatamente.
+                    # Nunca cancelar dentro de _lock: el callback necesita adquirir
+                    # este mismo lock para retirar la tarea terminada.
+                    previous_to_cancel = previous
 
             job_id = uuid.uuid4().hex[:12]
             token = CancellationToken()
@@ -159,6 +163,11 @@ class JobManager:
             resource_lock = None
             if resource_key:
                 resource_lock = self._resource_locks.setdefault(resource_key, threading.Lock())
+
+        # Cancelar fuera del lock evita un deadlock cuando Future.cancel()
+        # dispara _done_callback de forma síncrona para tareas que siguen en cola.
+        if previous_to_cancel is not None:
+            previous_to_cancel.cancel()
 
         context = JobContext(job_id=job_id, token=token, _progress_callback=on_progress)
 
