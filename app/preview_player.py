@@ -194,6 +194,23 @@ class PreviewPlayer(QFrame):
         self._pause_btn.setEnabled(enabled and self._duration > 0)
         self._stop_btn.setEnabled(enabled and self._duration > 0)
 
+    def clear_audio(self) -> None:
+        """Limpia el transporte y el estado visual cuando no queda audio cargado."""
+        self._duration = 0.0
+        self._user_scrubbing = False
+        self._current_lbl.setText("00:00.0")
+        self._total_lbl.setText("00:00.0")
+        self._seek_slider.blockSignals(True)
+        self._seek_slider.setValue(0)
+        self._seek_slider.setEnabled(False)
+        self._seek_slider.blockSignals(False)
+        self._selection_lbl.setText("Fragmento: Completo")
+        self._clear_sel_btn.setVisible(False)
+        for button in (self._play_btn, self._pause_btn, self._stop_btn):
+            button.setEnabled(False)
+        self.set_processing_state(False, "Sin audio cargado", 0.0)
+        self.level_meter.reset()
+
     def set_position(self, seconds: float) -> None:
         if self._user_scrubbing or self._duration <= 0:
             return
