@@ -62,6 +62,29 @@ def test_sha256_and_zipslip_protection(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_deepfilternet_git_metadata_is_optional_when_git_is_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DeepFilterNet debe poder inicializarse en un portable sin git.exe."""
+    import logging
+
+    from models.deepfilternet_adapter import _make_git_root_optional
+
+    def missing_git() -> str:
+        raise FileNotFoundError(2, "The system cannot find the file specified", "git")
+
+    safe_get_git_root = _make_git_root_optional(missing_git)
+    with caplog.at_level(logging.INFO, logger="zentralaudio.models.deepfilternet3"):
+        assert safe_get_git_root() is None
+
+    assert "Git no está instalado" in caplog.text
+
+    # Cuando Git existe y el proyecto está dentro de un repositorio, se conserva
+    # el comportamiento original y se devuelve la raíz detectada.
+    assert _make_git_root_optional(lambda: "C:/source/ZenTralAudio")() == "C:/source/ZenTralAudio"
+
+
+@pytest.mark.unit
 def test_deepfilternet_initialization_has_safe_stdout_and_stderr_without_console(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
