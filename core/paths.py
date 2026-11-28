@@ -33,6 +33,8 @@ class AppPaths:
     custom_presets_dir: Path
     resources_dir: Path
     bin_dir: Path
+    data_root: Path | None = None
+    layout: str = "portable"
 
     @classmethod
     def detect(
@@ -41,26 +43,50 @@ class AppPaths:
         frozen: bool | None = None,
         executable_path: Path | None = None,
         meipass_path: Path | None = None,
+        platform: str | None = None,
+        user_home: Path | None = None,
+        environ: dict[str, str] | None = None,
     ) -> AppPaths:
         """Detecta la raíz portable y construye todas las rutas de la aplicación.
+
+        Disposición de los datos modificables (config, modelos, logs, caché...):
+
+        - Windows / ejecución desde el código fuente: junto a la aplicación
+          (modo portable, comportamiento histórico).
+        - ``.app`` de macOS: en las carpetas estándar del usuario
+          (``~/Library/Application Support``, ``Caches``, ``Logs`` y
+          ``~/Music/ZenTralAudio`` para exportaciones), porque el bundle puede
+          estar en /Applications (sin permisos de escritura) y macOS invalida la
+          firma de un bundle modificado. Si junto a la ``.app`` existe
+          ``models_data`` o el archivo ``ZenTralAudio.portable``, se mantiene el
+          modo portable de la edición Offline AI.
+        - ``ZENTRALAUDIO_MACOS_USER_DIRS=1`` fuerza las carpetas estándar de
+          macOS (lo usa el lanzador de desarrollo para compartir modelos y
+          ajustes con la ``.app``) y ``ZENTRALAUDIO_DATA_DIR`` permite una raíz
+          de datos personalizada.
 
         Los parámetros opcionales permiten pruebas deterministas simulando entornos
         congelados (PyInstaller) sin alterar el proceso actual.
         """
         is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+        platform_name = platform or sys.platform
+        env = os.environ if environ is None else environ
+        home = Path(user_home) if user_home is not None else Path.home()
+        in_macos_bundle = False
 
         if is_frozen:
             exe = Path(executable_path or sys.executable).resolve()
             raw_meipass = meipass_path or getattr(sys, "_MEIPASS", None)
 
             # PyInstaller coloca el binario de una app macOS en:
-            # <portable>/ZenTralAudio.app/Contents/MacOS/ZenTralAudio
-            # Los datos modificables deben quedar fuera del .app, junto a este.
+            # <carpeta>/ZenTralAudio.app/Contents/MacOS/ZenTralAudio
+            # Los datos modificables nunca se guardan dentro del .app.
             if (
                 exe.parent.name == "MacOS"
                 and exe.parent.parent.name == "Contents"
                 and exe.parent.parent.parent.suffix == ".app"
             ):
+                in_macos_bundle = True
                 app_bundle = exe.parent.parent.parent
                 app_root = app_bundle.parent
                 bundle_root = app_bundle / "Contents" / "Resources"
@@ -74,21 +100,50 @@ class AppPaths:
         presets_dir = cls._resolve_bundle_subdir(app_root, bundle_root, "presets")
         resources_dir = cls._resolve_bundle_subdir(app_root, bundle_root, "resources")
 
+        custom_root = env.get("ZENTRALAUDIO_DATA_DIR", "").strip()
+        portable_marker = (app_root / "models_data").is_dir() or (app_root / "ZenTralAudio.portable").is_file()
+        use_macos_user_dirs = platform_name == "darwin" and (
+            (in_macos_bundle and not portable_marker)
+            or env.get("ZENTRALAUDIO_MACOS_USER_DIRS", "") == "1"
+        )
+
+        if custom_root:
+            data_root = Path(custom_root).expanduser().resolve()
+            layout = "custom"
+            cache_dir = data_root / "cache"
+            logs_dir = data_root / "logs"
+            exports_dir = data_root / "exports"
+        elif use_macos_user_dirs:
+            library = home / "Library"
+            data_root = library / "Application Support" / APP_NAME
+            layout = "macos-user"
+            cache_dir = library / "Caches" / APP_NAME
+            logs_dir = library / "Logs" / APP_NAME
+            exports_dir = home / "Music" / APP_NAME
+        else:
+            data_root = app_root
+            layout = "portable"
+            cache_dir = data_root / "cache"
+            logs_dir = data_root / "logs"
+            exports_dir = data_root / "exports"
+
         return cls(
             is_frozen=is_frozen,
             app_root=app_root,
             bundle_root=bundle_root,
-            models_dir=app_root / "models_data",
-            ambience_dir=app_root / "ambience_data",
-            cache_dir=app_root / "cache",
-            projects_dir=app_root / "projects",
-            exports_dir=app_root / "exports",
-            config_dir=app_root / "config",
-            logs_dir=app_root / "logs",
+            models_dir=data_root / "models_data",
+            ambience_dir=data_root / "ambience_data",
+            cache_dir=cache_dir,
+            projects_dir=data_root / "projects",
+            exports_dir=exports_dir,
+            config_dir=data_root / "config",
+            logs_dir=logs_dir,
             presets_dir=presets_dir,
-            custom_presets_dir=app_root / "presets" / "custom",
+            custom_presets_dir=data_root / "presets" / "custom",
             resources_dir=resources_dir,
-            bin_dir=app_root / "bin",
+            bin_dir=data_root / "bin",
+            data_root=data_root,
+            layout=layout,
         )
 
     @staticmethod
@@ -163,6 +218,7 @@ class AppPaths:
         candidates.extend(
             [
                 self.bin_dir / exe_name,
+                self.app_root / "bin" / exe_name,
                 self.app_root / exe_name,
                 self.bundle_root / "bin" / exe_name,
                 self.bundle_root / exe_name,
@@ -174,7 +230,27 @@ class AppPaths:
                 return candidate.resolve()
 
         system_ffmpeg = shutil.which(exe_name)
-        return Path(system_ffmpeg).resolve() if system_ffmpeg else None
+        if system_ffmpeg:
+            return Path(system_ffmpeg).resolve()
+
+        # Las apps abiertas desde Finder no heredan el PATH de la terminal, así que
+        # se buscan también las rutas habituales de Homebrew.
+        if os.name != "nt":
+            for prefix in ("/opt/homebrew/bin", "/usr/local/bin"):
+                candidate = Path(prefix) / exe_name
+                if candidate.is_file():
+                    return candidate.resolve()
+
+        # Binario estático de imageio-ffmpeg (dependencia de desarrollo en macOS).
+        try:
+            import imageio_ffmpeg
+
+            bundled = Path(imageio_ffmpeg.get_ffmpeg_exe())
+            if bundled.is_file():
+                return bundled.resolve()
+        except Exception:
+            pass
+        return None
 
     def find_ffprobe(self, custom_ffmpeg_path: str | Path | None = None) -> Path | None:
         """Localiza ffprobe asociado a ffmpeg o en el sistema."""
@@ -199,7 +275,9 @@ class AppPaths:
         """Devuelve un resumen legible de todas las rutas detectadas."""
         return {
             "is_frozen": str(self.is_frozen),
+            "layout": self.layout,
             "app_root": str(self.app_root),
+            "data_root": str(self.data_root or self.app_root),
             "bundle_root": str(self.bundle_root),
             "models_dir": str(self.models_dir),
             "ambience_dir": str(self.ambience_dir),

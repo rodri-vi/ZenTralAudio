@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,26 @@ from engine.audio_types import AudioBuffer, AudioMetadata
 logger = logging.getLogger("zentralaudio.audio_io")
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
-_SOUNDFILE_DIRECT_EXTS = frozenset({".wav", ".flac", ".aiff", ".aif", ".ogg"})
+_SOUNDFILE_BASE_EXTS = {".wav", ".flac", ".aiff", ".aif", ".ogg"}
+
+
+def _libsndfile_supports_mp3() -> bool:
+    """libsndfile >= 1.1 lee y escribe MP3 sin depender de FFmpeg."""
+    try:
+        return "MP3" in sf.available_formats()
+    except Exception:
+        return False
+
+
+_LIBSNDFILE_MP3 = _libsndfile_supports_mp3()
+# MP3 se decodifica con libsndfile cuando está disponible (incluido en las
+# ruedas de soundfile >= 0.12 para macOS y Windows). FFmpeg queda como respaldo
+# y sigue siendo necesario para M4A/AAC.
+_SOUNDFILE_DIRECT_EXTS = frozenset(_SOUNDFILE_BASE_EXTS | ({".mp3"} if _LIBSNDFILE_MP3 else set()))
+_FFMPEG_HINT = (
+    "Coloca ffmpeg en la carpeta 'bin/' de la aplicación, instálalo (p. ej. con Homebrew) "
+    "o configúralo en Ajustes."
+)
 
 
 def _subprocess_kwargs() -> dict[str, Any]:
@@ -173,7 +193,7 @@ def probe_audio_info(
     if ffprobe is None:
         raise FFmpegNotFoundError(
             f"No se pudo inspeccionar '{resolved.name}' sin FFmpeg/FFprobe.",
-            details="Coloca ffmpeg.exe y ffprobe.exe en la carpeta 'bin/' o en el PATH.",
+            details=_FFMPEG_HINT,
         )
 
     cmd = [
@@ -277,7 +297,7 @@ def _decode_with_ffmpeg(
     if ffmpeg is None:
         raise FFmpegNotFoundError(
             f"Se requiere FFmpeg para decodificar el formato '{resolved.suffix}'.",
-            details="Coloca ffmpeg.exe en 'bin/' o configúralo en Ajustes.",
+            details=_FFMPEG_HINT,
         )
 
     # Intentar obtener metadatos originales primero si ffprobe está disponible
@@ -312,7 +332,7 @@ def _decode_with_ffmpeg(
         if proc.returncode != 0 or not tmp_wav.is_file():
             raise AudioFormatUnsupportedError(
                 f"FFmpeg no pudo decodificar '{resolved.name}'.",
-                details=proc.stderr.strip(),
+                details=_describe_ffmpeg_failure(ffmpeg, proc.returncode, proc.stderr),
             )
 
         data, decoded_info = _read_soundfile_cancellable(tmp_wav, cancel_token=cancel_token)
@@ -370,38 +390,21 @@ def write_audio(
             app_paths = paths or AppPaths.detect()
             custom = config.ffmpeg_custom_path if config else None
             ffmpeg = app_paths.find_ffmpeg(custom)
-            if ffmpeg is None:
-                raise FFmpegNotFoundError(
-                    "Se requiere FFmpeg para exportar en formato MP3.",
-                    details="Configura ffmpeg.exe en Ajustes o exporta en WAV/FLAC.",
+            ffmpeg_error: str | None = None
+            if ffmpeg is not None:
+                ffmpeg_error = _encode_mp3_with_ffmpeg(
+                    ffmpeg, safe_samples, buffer.sample_rate, tmp_target, mp3_bitrate_kbps, cancel_token
                 )
-            with tempfile.TemporaryDirectory(prefix="zentral_enc_") as tmp_dir:
-                wav_in = Path(tmp_dir) / "stage.wav"
-                sf.write(str(wav_in), safe_samples.T, buffer.sample_rate, subtype="FLOAT", format="WAV")
-                if cancel_token:
-                    cancel_token.raise_if_cancelled()
-                cmd = [
-                    str(ffmpeg),
-                    "-y",
-                    "-v",
-                    "error",
-                    "-i",
-                    str(wav_in),
-                    "-c:a",
-                    "libmp3lame",
-                    "-b:a",
-                    f"{int(mp3_bitrate_kbps)}k",
-                    str(tmp_target),
-                ]
-                proc = _run_subprocess_cancellable(
-                    cmd, cancel_token=cancel_token, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, encoding="utf-8", **_subprocess_kwargs(),
-                )
-                if proc.returncode != 0 or not tmp_target.is_file():
-                    raise AudioIOError(
-                        "Error al codificar el archivo MP3 con FFmpeg.",
-                        details=proc.stderr.strip(),
+                if ffmpeg_error is not None:
+                    logger.warning("FFmpeg no pudo codificar MP3; usando libsndfile: %s", ffmpeg_error)
+            if ffmpeg is None or ffmpeg_error is not None:
+                if not _LIBSNDFILE_MP3:
+                    raise FFmpegNotFoundError(
+                        "Se requiere FFmpeg para exportar en formato MP3.",
+                        details=ffmpeg_error or _FFMPEG_HINT,
                     )
+                tmp_target.unlink(missing_ok=True)
+                _encode_mp3_with_libsndfile(safe_samples, buffer.sample_rate, tmp_target, mp3_bitrate_kbps)
         else:
             raise AudioFormatUnsupportedError(f"Formato de salida no soportado: '{export_format}'")
 
@@ -419,3 +422,64 @@ def write_audio(
     except BaseException:
         tmp_target.unlink(missing_ok=True)
         raise
+
+
+def _describe_ffmpeg_failure(ffmpeg: Path, returncode: int, stderr: str | None) -> str:
+    """Explica fallos típicos de FFmpeg, incluido el bloqueo de Gatekeeper en macOS."""
+    detail = (stderr or "").strip()
+    if sys.platform == "darwin" and returncode in (-9, 137):
+        return (
+            f"macOS bloqueó la ejecución de {ffmpeg} (binario descargado en cuarentena o sin "
+            "firma válida). Usa el FFmpeg incluido en la app, instala FFmpeg con Homebrew o "
+            "desbloquéalo en Ajustes del Sistema > Privacidad y seguridad."
+        )
+    return detail or f"FFmpeg terminó con código {returncode}."
+
+
+def _encode_mp3_with_ffmpeg(
+    ffmpeg: Path,
+    samples: np.ndarray,
+    sample_rate: int,
+    target: Path,
+    bitrate_kbps: int,
+    cancel_token: CancellationToken | None,
+) -> str | None:
+    """Codifica con libmp3lame. Devuelve None si tuvo éxito o el motivo del fallo."""
+    with tempfile.TemporaryDirectory(prefix="zentral_enc_") as tmp_dir:
+        wav_in = Path(tmp_dir) / "stage.wav"
+        sf.write(str(wav_in), samples.T, sample_rate, subtype="FLOAT", format="WAV")
+        if cancel_token:
+            cancel_token.raise_if_cancelled()
+        cmd = [
+            str(ffmpeg), "-y", "-v", "error", "-i", str(wav_in),
+            "-c:a", "libmp3lame", "-b:a", f"{int(bitrate_kbps)}k", "-f", "mp3", str(target),
+        ]
+        try:
+            proc = _run_subprocess_cancellable(
+                cmd, cancel_token=cancel_token, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", **_subprocess_kwargs(),
+            )
+        except OSError as exc:
+            return str(exc)
+        if proc.returncode != 0 or not target.is_file():
+            return _describe_ffmpeg_failure(ffmpeg, proc.returncode, proc.stderr)
+    return None
+
+
+def _encode_mp3_with_libsndfile(samples: np.ndarray, sample_rate: int, target: Path, bitrate_kbps: int) -> None:
+    """Codificador MP3 integrado (LAME vía libsndfile), sin procesos externos."""
+    if sample_rate not in (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000):
+        raise AudioFormatUnsupportedError(
+            f"MP3 no admite {sample_rate} Hz. Exporta en WAV/FLAC o remuestrea a 44.1/48 kHz."
+        )
+    # compression_level 0.0 = máxima calidad (320 kbps en CBR); 1.0 = mínima.
+    level = max(0.0, min(1.0, (320.0 - float(bitrate_kbps)) / (320.0 - 32.0)))
+    sf.write(
+        str(target),
+        samples.T,
+        sample_rate,
+        format="MP3",
+        subtype="MPEG_LAYER_III",
+        compression_level=level,
+        bitrate_mode="CONSTANT",
+    )

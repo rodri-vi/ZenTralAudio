@@ -120,14 +120,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _detect_compute_badge() -> str:
-        try:
-            import torch
+        from core.platform_utils import compute_device_label
 
-            if torch.cuda.is_available():
-                return f"GPU CUDA: {torch.cuda.get_device_name(0)}"
-        except Exception:
-            pass
-        return "Modo CPU"
+        return compute_device_label()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.controller.shutdown()
