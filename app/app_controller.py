@@ -642,6 +642,9 @@ class AppController(QObject):
     def _request_debounced_preview_render(self) -> None:
         """Renderiza solo el último estado tras una pausa breve en controles continuos."""
         if self._source_path is not None:
+            # Detener cuanto antes cualquier render que haya quedado obsoleto.
+            # La siguiente previsualización se lanzará cuando el usuario haga una pausa.
+            self.job_manager.cancel_group("preview_render")
             self._preview_render_timer.start()
 
     def _on_intensity_changed(self, value: int) -> None:
