@@ -29,6 +29,7 @@ class RestorationTab(QWidget):
     """Centro principal de restauración de voz de ZenTralAudio."""
 
     open_file_requested = Signal(str)
+    clear_audio_requested = Signal()
     play_original_requested = Signal()
     model_selected = Signal(str)
     manage_models_requested = Signal()
@@ -60,6 +61,14 @@ class RestorationTab(QWidget):
         self._play_orig_btn.setToolTip("Reproducir la grabación original sin procesamiento.")
         self._play_orig_btn.clicked.connect(self.play_original_requested.emit)
 
+        self._clear_audio_btn = QPushButton("Eliminar audio")
+        self._clear_audio_btn.setObjectName("DangerButton")
+        self._clear_audio_btn.setEnabled(False)
+        self._clear_audio_btn.setToolTip(
+            "Quita el audio de esta sesión de ZenTralAudio. No borra el archivo original del disco."
+        )
+        self._clear_audio_btn.clicked.connect(self.clear_audio_requested.emit)
+
         self._file_name_lbl = QLabel("Ningún archivo cargado")
         self._file_name_lbl.setStyleSheet("font-weight: 600;")
 
@@ -67,11 +76,13 @@ class RestorationTab(QWidget):
         self._view_mode_combo.addItem("Forma de onda", "waveform")
         self._view_mode_combo.addItem("Espectrograma", "spectrogram")
         self._view_mode_combo.addItem("Vista dividida", "split")
-        self._view_mode_combo.setCurrentIndex(2)
+        # La vista inicial muestra solo la forma de onda para reservar espacio.
+        self._view_mode_combo.setCurrentIndex(0)
         self._view_mode_combo.currentIndexChanged.connect(self._update_visualizer_mode)
 
         file_top.addWidget(self._open_btn)
         file_top.addWidget(self._play_orig_btn)
+        file_top.addWidget(self._clear_audio_btn)
         file_top.addSpacing(8)
         file_top.addWidget(self._file_name_lbl, stretch=1)
         file_top.addWidget(QLabel("Vista:"))
@@ -97,8 +108,9 @@ class RestorationTab(QWidget):
         self.spectrogram.file_dropped.connect(self.open_file_requested.emit)
         self._vis_splitter.addWidget(self.waveform)
         self._vis_splitter.addWidget(self.spectrogram)
-        self._vis_splitter.setSizes([150, 140])
+        self._vis_splitter.setSizes([180, 110])
         file_layout.addWidget(self._vis_splitter, stretch=1)
+        self._update_visualizer_mode()
 
         root.addWidget(file_group, stretch=2)
 
@@ -195,6 +207,7 @@ class RestorationTab(QWidget):
 
         self.advanced_panel = DynamicParamPanel()
         self.advanced_panel.setVisible(False)
+        self.advanced_panel.setMinimumHeight(0)
         self.advanced_panel.parameter_changed.connect(self.advanced_param_changed.emit)
         self.advanced_panel.reset_requested.connect(self.advanced_reset_requested.emit)
         root.addWidget(self.advanced_panel, stretch=2)
@@ -249,6 +262,17 @@ class RestorationTab(QWidget):
         ch_text = "Mono (1)" if channels == 1 else f"Estéreo ({channels})" if channels == 2 else f"{channels} ch"
         self._meta_channels.setText(f"Canales: {ch_text}")
         self._play_orig_btn.setEnabled(True)
+        self._clear_audio_btn.setEnabled(True)
+
+    def set_audio_cleared(self) -> None:
+        """Restablece etiquetas y botones cuando se quita el audio de la sesión."""
+        self._file_name_lbl.setText("Ningún archivo cargado")
+        self._meta_duration.setText("Duración: —")
+        self._meta_sr.setText("Frecuencia: —")
+        self._meta_bits.setText("Profundidad: —")
+        self._meta_channels.setText("Canales: —")
+        self._play_orig_btn.setEnabled(False)
+        self._clear_audio_btn.setEnabled(False)
 
     def set_intensity(self, value: int) -> None:
         clamped = max(0, min(100, int(value)))
@@ -323,4 +347,14 @@ class RestorationTab(QWidget):
 
     def _on_advanced_toggled(self, checked: bool) -> None:
         self.advanced_panel.setVisible(checked)
+        if checked:
+            # Reserva aproximadamente tres cuartas partes del espacio útil al
+            # panel avanzado, dejando una franja superior para el audio cargado.
+            self.advanced_panel.setMinimumHeight(280)
+            self.layout().setStretch(0, 1)
+            self.layout().setStretch(2, 3)
+        else:
+            self.advanced_panel.setMinimumHeight(0)
+            self.layout().setStretch(0, 2)
+            self.layout().setStretch(2, 2)
         self._adv_toggle_btn.setText("OPCIONES AVANZADAS ^" if checked else "OPCIONES AVANZADAS v")
