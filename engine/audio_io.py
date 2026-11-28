@@ -18,6 +18,7 @@ from core.exceptions import (
     AudioFormatUnsupportedError,
     AudioIOError,
     FFmpegNotFoundError,
+    JobCancelledError,
 )
 from core.job_manager import CancellationToken
 from core.paths import AppPaths
@@ -35,6 +36,77 @@ def _subprocess_kwargs() -> dict[str, Any]:
     if os.name == "nt":
         kwargs["creationflags"] = _CREATE_NO_WINDOW
     return kwargs
+
+
+def _run_subprocess_cancellable(
+    command: list[str],
+    *,
+    cancel_token: CancellationToken | None = None,
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Ejecuta FFmpeg/FFprobe permitiendo terminar el proceso al cancelar."""
+    if cancel_token is None:
+        return subprocess.run(command, **kwargs)
+
+    cancel_token.raise_if_cancelled()
+    process = subprocess.Popen(command, **kwargs)
+    try:
+        while True:
+            if cancel_token.is_cancelled:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.communicate(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+                cancel_token.raise_if_cancelled()
+
+            try:
+                stdout, stderr = process.communicate(timeout=0.1)
+                cancel_token.raise_if_cancelled()
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    except BaseException:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.communicate(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+        raise
+
+
+def _read_soundfile_cancellable(
+    file_path: str | Path,
+    *,
+    cancel_token: CancellationToken | None = None,
+) -> tuple[np.ndarray, sf._SoundFileInfo]:
+    """Lee audio por bloques para que una carga grande se pueda cancelar."""
+    info = sf.info(str(file_path))
+    if info.frames <= 0 or info.channels <= 0 or info.samplerate <= 0:
+        raise AudioFormatUnsupportedError(f"El archivo '{Path(file_path).name}' no contiene audio válido.")
+
+    chunks: list[np.ndarray] = []
+    with sf.SoundFile(str(file_path), mode="r") as source:
+        remaining = int(info.frames)
+        while remaining > 0:
+            if cancel_token:
+                cancel_token.raise_if_cancelled()
+            block = source.read(frames=min(65536, remaining), dtype="float32", always_2d=True)
+            if block.size == 0:
+                break
+            chunks.append(block)
+            remaining -= int(block.shape[0])
+
+    if cancel_token:
+        cancel_token.raise_if_cancelled()
+    if not chunks:
+        raise AudioFormatUnsupportedError(f"El archivo '{Path(file_path).name}' está vacío.")
+    samples = chunks[0] if len(chunks) == 1 else np.concatenate(chunks, axis=0)
+    return samples, info
 
 
 def _subtype_to_bit_depth(subtype: str | None) -> int | None:
@@ -68,8 +140,11 @@ def probe_audio_info(
     *,
     paths: AppPaths | None = None,
     config: AppSettings | None = None,
+    cancel_token: CancellationToken | None = None,
 ) -> AudioMetadata:
     """Inspecciona un archivo sin cargarlo entero en memoria cuando es posible."""
+    if cancel_token:
+        cancel_token.raise_if_cancelled()
     resolved = validate_audio_input_path(path)
     if resolved.suffix.lower() in _SOUNDFILE_DIRECT_EXTS:
         try:
@@ -111,7 +186,10 @@ def probe_audio_info(
         "json",
         str(resolved),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", **_subprocess_kwargs())
+    proc = _run_subprocess_cancellable(
+        cmd, cancel_token=cancel_token, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", **_subprocess_kwargs(),
+    )
     if proc.returncode != 0:
         raise AudioFormatUnsupportedError(
             f"No se pudo leer la cabecera de audio de '{resolved.name}'.",
@@ -146,15 +224,17 @@ def load_audio(
     *,
     paths: AppPaths | None = None,
     config: AppSettings | None = None,
+    cancel_token: CancellationToken | None = None,
 ) -> tuple[AudioBuffer, AudioMetadata]:
     """Carga y decodifica un archivo de audio en float32 conservando su frecuencia original."""
+    if cancel_token:
+        cancel_token.raise_if_cancelled()
     resolved = validate_audio_input_path(path)
     ext = resolved.suffix.lower()
 
     if ext in _SOUNDFILE_DIRECT_EXTS:
         try:
-            info = sf.info(str(resolved))
-            samples, sr = sf.read(str(resolved), dtype="float32", always_2d=True)
+            samples, info = _read_soundfile_cancellable(resolved, cancel_token=cancel_token)
             if samples.size == 0:
                 raise AudioFormatUnsupportedError(f"El archivo '{resolved.name}' no contiene audio.")
             buf = AudioBuffer(samples=samples.T, sample_rate=int(sr))
@@ -167,13 +247,15 @@ def load_audio(
                 num_samples=buf.num_samples,
                 codec_name=str(info.format),
             )
+            if cancel_token:
+                cancel_token.raise_if_cancelled()
             return buf, meta
-        except AudioFormatUnsupportedError:
+        except (AudioFormatUnsupportedError, JobCancelledError):
             raise
         except Exception as exc:
             logger.debug("Lectura directa SoundFile falló para %s (%s); probando FFmpeg.", resolved.name, exc)
 
-    return _decode_with_ffmpeg(resolved, paths=paths, config=config)
+    return _decode_with_ffmpeg(resolved, paths=paths, config=config, cancel_token=cancel_token)
 
 
 def _decode_with_ffmpeg(
@@ -181,7 +263,10 @@ def _decode_with_ffmpeg(
     *,
     paths: AppPaths | None,
     config: AppSettings | None,
+    cancel_token: CancellationToken | None = None,
 ) -> tuple[AudioBuffer, AudioMetadata]:
+    if cancel_token:
+        cancel_token.raise_if_cancelled()
     app_paths = paths or AppPaths.detect()
     custom = config.ffmpeg_custom_path if config else None
     ffmpeg = app_paths.find_ffmpeg(custom)
@@ -194,7 +279,11 @@ def _decode_with_ffmpeg(
     # Intentar obtener metadatos originales primero si ffprobe está disponible
     probed: AudioMetadata | None = None
     try:
-        probed = probe_audio_info(resolved, paths=app_paths, config=config)
+        probed = probe_audio_info(
+            resolved, paths=app_paths, config=config, cancel_token=cancel_token
+        )
+    except JobCancelledError:
+        raise
     except Exception:
         probed = None
 
@@ -212,14 +301,17 @@ def _decode_with_ffmpeg(
             "pcm_f32le",
             str(tmp_wav),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", **_subprocess_kwargs())
+        proc = _run_subprocess_cancellable(
+            cmd, cancel_token=cancel_token, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", **_subprocess_kwargs(),
+        )
         if proc.returncode != 0 or not tmp_wav.is_file():
             raise AudioFormatUnsupportedError(
                 f"FFmpeg no pudo decodificar '{resolved.name}'.",
                 details=proc.stderr.strip(),
             )
 
-        data, sr = sf.read(str(tmp_wav), dtype="float32", always_2d=True)
+        data, _ = _read_soundfile_cancellable(tmp_wav, cancel_token=cancel_token)
         if data.size == 0:
             raise AudioFormatUnsupportedError(f"El archivo '{resolved.name}' decodificado está vacío.")
 
@@ -233,6 +325,8 @@ def _decode_with_ffmpeg(
             num_samples=buf.num_samples,
             codec_name=probed.codec_name if probed else resolved.suffix.lstrip("."),
         )
+        if cancel_token:
+            cancel_token.raise_if_cancelled()
         return buf, meta
 
 
@@ -295,7 +389,10 @@ def write_audio(
                     f"{int(mp3_bitrate_kbps)}k",
                     str(tmp_target),
                 ]
-                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", **_subprocess_kwargs())
+                proc = _run_subprocess_cancellable(
+                    cmd, cancel_token=cancel_token, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, encoding="utf-8", **_subprocess_kwargs(),
+                )
                 if proc.returncode != 0 or not tmp_target.is_file():
                     raise AudioIOError(
                         "Error al codificar el archivo MP3 con FFmpeg.",
@@ -309,7 +406,9 @@ def write_audio(
 
         os.replace(tmp_target, output_path)
         # Verificación post-escritura
-        verified_buf, verified_meta = load_audio(output_path, paths=paths, config=config)
+        verified_buf, verified_meta = load_audio(
+            output_path, paths=paths, config=config, cancel_token=cancel_token
+        )
         if verified_buf.num_samples == 0:
             raise AudioIOError(f"El archivo exportado resultó vacío: {output_path}")
         return verified_meta
