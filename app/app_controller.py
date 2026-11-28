@@ -354,7 +354,9 @@ class AppController(QObject):
             resource_key="pipeline_compute",
             on_progress=lambda p, msg: self._sig_job_progress.emit(True, msg, p),
             on_completed=lambda out: self._sig_render_ready.emit(out),
-            on_failed=lambda exc: self._sig_job_error.emit(str(exc)),
+            on_failed=lambda exc: self._sig_job_error.emit(
+                exc.format_for_user() if isinstance(exc, ZenTralAudioError) else str(exc)
+            ),
             on_cancelled=lambda: None,
         )
 
@@ -989,7 +991,9 @@ class AppController(QObject):
             resource_key="pipeline_compute",
             on_progress=lambda fraction, message: self._sig_job_progress.emit(True, message, fraction),
             on_completed=lambda path: self._sig_export_done.emit(str(path)),
-            on_failed=lambda exc: self._sig_job_error.emit(str(exc)),
+            on_failed=lambda exc: self._sig_job_error.emit(
+                exc.format_for_user() if isinstance(exc, ZenTralAudioError) else str(exc)
+            ),
             on_cancelled=lambda: self._sig_job_progress.emit(False, "Exportación cancelada", 0.0),
         )
 
