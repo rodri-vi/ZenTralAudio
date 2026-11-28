@@ -24,6 +24,69 @@ from tests.conftest import make_sine_buffer
 
 
 @pytest.mark.unit
+@pytest.mark.unit
+def test_ambience_layer_solo_sync_does_not_rebuild_or_emit_duplicate_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Solo se sincroniza en sitio y no dispara un segundo evento genérico."""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from app.environment_tab import EnvironmentTab
+
+    app = QApplication.instance() or QApplication([])
+    tab = EnvironmentTab()
+    tab.set_layers(
+        [
+            {
+                "layer_id": "layer_a",
+                "name": "Capa A",
+                "enabled": True,
+                "volume": 0.35,
+                "pan": 0.0,
+                "solo": False,
+            },
+            {
+                "layer_id": "layer_b",
+                "name": "Capa B",
+                "enabled": True,
+                "volume": 0.35,
+                "pan": 0.0,
+                "solo": False,
+            },
+        ]
+    )
+    first_widget = tab._layer_widgets["layer_a"]
+    solo_events: list[tuple[str, bool]] = []
+    state_events: list[tuple[str, dict[str, Any]]] = []
+    tab.layer_solo_toggled.connect(lambda layer_id, checked: solo_events.append((layer_id, checked)))
+    tab.layer_changed.connect(lambda layer_id, state: state_events.append((layer_id, state)))
+
+    first_widget._solo_btn.click()
+
+    assert solo_events == [("layer_a", True)]
+    assert state_events == []
+    assert tab._layer_widgets["layer_a"] is first_widget
+    assert tab._layer_widgets["layer_a"]._solo_btn.isChecked()
+
+    tab.set_layer_solo_states(
+        [
+            {"layer_id": "layer_a", "solo": False},
+            {"layer_id": "layer_b", "solo": True},
+        ]
+    )
+
+    assert tab._layer_widgets["layer_a"] is first_widget
+    assert not first_widget._solo_btn.isChecked()
+    assert tab._layer_widgets["layer_b"]._solo_btn.isChecked()
+    # La sincronización programática no vuelve a emitir señales.
+    assert solo_events == [("layer_a", True)]
+    assert state_events == []
+
+    tab.close()
+    _ = app
+
+
 def test_catalog_contains_all_fourteen_environments() -> None:
     paths = AppPaths.detect(frozen=False)
     catalog = EnvironmentCatalog(paths)
