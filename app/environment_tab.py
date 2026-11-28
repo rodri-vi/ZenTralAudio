@@ -96,6 +96,10 @@ class EnvironmentTab(QWidget):
         self._workspace_splitter = QSplitter(Qt.Orientation.Vertical)
         self._workspace_splitter.setObjectName("EnvironmentWorkspaceSplitter")
         self._workspace_splitter.setHandleWidth(8)
+        self._workspace_splitter.setStyleSheet(
+            f"QSplitter::handle {{ background: {Palette.BORDER}; }} "
+            f"QSplitter::handle:hover {{ background: {Palette.ACCENT_PRIMARY}; }}"
+        )
         self._workspace_splitter.setChildrenCollapsible(False)
         self._workspace_splitter.addWidget(top_group)
 
@@ -103,6 +107,10 @@ class EnvironmentTab(QWidget):
         self._panels_splitter = splitter
         splitter.setObjectName("AcousticMixerSplitter")
         splitter.setHandleWidth(8)
+        splitter.setStyleSheet(
+            f"QSplitter::handle {{ background: {Palette.BORDER}; }} "
+            f"QSplitter::handle:hover {{ background: {Palette.ACCENT_PRIMARY}; }}"
+        )
         splitter.setChildrenCollapsible(False)
 
         acoustics_group = QGroupBox("Simulación Acústica (Convolución IR / Algorítmica)")
