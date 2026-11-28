@@ -18,7 +18,12 @@ from core.paths import AppPaths
 from engine.audio_types import AudioBuffer
 from models.base_adapter import BaseModelAdapter, ModelCapabilities, ModelStatus, ParameterSpec
 from models.isolated_runners.subprocess_runner import find_isolated_python, run_in_isolated_subprocess
+from models.chunking import process_in_chunks
 from models.model_manager import ModelManager
+
+# Segmentos solapados: VoiceFixer usa ~3,8 GB con 10 s de audio (ver models/chunking.py).
+CHUNK_SECONDS = 8.0
+OVERLAP_SECONDS = 0.5
 
 
 class VoiceFixerAdapter(BaseModelAdapter):
@@ -147,8 +152,8 @@ class VoiceFixerAdapter(BaseModelAdapter):
         use_cuda = str(params.get("device", "auto")) in ("auto", "cuda") and torch.cuda.is_available()
         out_channels = np.zeros_like(buffer.samples, dtype=np.float32)
 
-        for ch in range(buffer.channels):
-            mono = AudioBuffer(samples=buffer.samples[ch : ch + 1], sample_rate=44100)
+        def infer(segment: np.ndarray) -> np.ndarray:
+            mono = AudioBuffer(samples=segment[np.newaxis, :], sample_rate=44100)
             if iso_py is not None:
                 res = run_in_isolated_subprocess(
                     python_exe=iso_py,
@@ -160,18 +165,34 @@ class VoiceFixerAdapter(BaseModelAdapter):
                     params={"model_vf_mode": mode},
                     cancel_token=cancel_token,
                 )
-                out_channels[ch] = res.samples[0, : buffer.num_samples]
-            else:
-                self.load_model()
-                with tempfile.TemporaryDirectory(prefix="zentral_vf_run_") as tmp_dir:
-                    in_wav = Path(tmp_dir) / "in.wav"
-                    out_wav = Path(tmp_dir) / "out.wav"
-                    sf.write(str(in_wav), mono.samples[0], 44100, subtype="FLOAT")
-                    try:
-                        self._vf.restore(input=str(in_wav), output=str(out_wav), cuda=use_cuda, mode=mode)
-                        out_data, _ = sf.read(str(out_wav), dtype="float32", always_2d=True)
-                    except Exception as exc:
-                        raise ModelInferenceError("Error en inferencia de VoiceFixer.", details=str(exc)) from exc
-                    out_channels[ch] = out_data[:, 0][: buffer.num_samples]
+                return res.samples[0]
+            self.load_model()
+            with tempfile.TemporaryDirectory(prefix="zentral_vf_run_") as tmp_dir:
+                in_wav = Path(tmp_dir) / "in.wav"
+                out_wav = Path(tmp_dir) / "out.wav"
+                sf.write(str(in_wav), mono.samples[0], 44100, subtype="FLOAT")
+                try:
+                    self._vf.restore(input=str(in_wav), output=str(out_wav), cuda=use_cuda, mode=mode)
+                    out_data, _ = sf.read(str(out_wav), dtype="float32", always_2d=True)
+                except Exception as exc:
+                    raise ModelInferenceError("Error en inferencia de VoiceFixer.", details=str(exc)) from exc
+                return out_data[:, 0]
+
+        for ch in range(buffer.channels):
+            out_channels[ch] = process_in_chunks(
+                buffer.samples[ch],
+                44100,
+                chunk_seconds=CHUNK_SECONDS,
+                overlap_seconds=OVERLAP_SECONDS,
+                infer=infer,
+                cancel_token=cancel_token,
+                progress=(
+                    (lambda f, ch=ch: progress_cb(
+                        0.15 + 0.35 * (ch + f) / buffer.channels, "Procesando VoiceFixer..."
+                    ))
+                    if progress_cb
+                    else None
+                ),
+            )
 
         return AudioBuffer(samples=out_channels, sample_rate=44100)

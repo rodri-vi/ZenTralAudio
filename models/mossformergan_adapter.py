@@ -19,7 +19,12 @@ from core.paths import AppPaths
 from engine.audio_types import AudioBuffer
 from models.base_adapter import BaseModelAdapter, ModelCapabilities, ModelStatus, ParameterSpec
 from models.isolated_runners.subprocess_runner import find_isolated_python, run_in_isolated_subprocess
+from models.chunking import process_in_chunks
 from models.model_manager import ModelManager
+
+# Segmentos solapados: limitan el pico de memoria (ver models/chunking.py).
+CHUNK_SECONDS = 3.0
+OVERLAP_SECONDS = 0.5
 
 
 class MossFormerGANAdapter(BaseModelAdapter):
@@ -134,8 +139,8 @@ class MossFormerGANAdapter(BaseModelAdapter):
         worker = Path(__file__).resolve().parent / "isolated_runners" / "worker_entry.py"
         out_channels = np.zeros_like(buffer.samples, dtype=np.float32)
 
-        for ch in range(buffer.channels):
-            mono = AudioBuffer(samples=buffer.samples[ch : ch + 1], sample_rate=16000)
+        def infer(segment: np.ndarray) -> np.ndarray:
+            mono = AudioBuffer(samples=segment[np.newaxis, :], sample_rate=16000)
             if iso_py is not None:
                 res = run_in_isolated_subprocess(
                     python_exe=iso_py,
@@ -147,22 +152,37 @@ class MossFormerGANAdapter(BaseModelAdapter):
                     params=params,
                     cancel_token=cancel_token,
                 )
-                out_channels[ch] = res.samples[0, : buffer.num_samples]
-            else:
-                self.load_model()
-                with tempfile.TemporaryDirectory(prefix="zentral_mfgan_run_") as tmp_dir:
-                    in_wav = Path(tmp_dir) / "in.wav"
-                    sf.write(str(in_wav), mono.samples[0], 16000, subtype="FLOAT")
-                    prev_cwd = os.getcwd()
-                    if self._tmp_workdir:
-                        os.chdir(str(self._tmp_workdir))
-                    try:
-                        raw_out = self._cv_instance(input_path=str(in_wav), online_write=False)
-                    except Exception as exc:
-                        raise ModelInferenceError("Error en MossFormerGAN_SE_16K.", details=str(exc)) from exc
-                    finally:
-                        os.chdir(prev_cwd)
-                    arr = np.asarray(raw_out, dtype=np.float32).reshape(-1)
-                    out_channels[ch] = arr[: buffer.num_samples]
+                return res.samples[0]
+            self.load_model()
+            with tempfile.TemporaryDirectory(prefix="zentral_mfgan_run_") as tmp_dir:
+                in_wav = Path(tmp_dir) / "in.wav"
+                sf.write(str(in_wav), mono.samples[0], 16000, subtype="FLOAT")
+                prev_cwd = os.getcwd()
+                if self._tmp_workdir:
+                    os.chdir(str(self._tmp_workdir))
+                try:
+                    raw_out = self._cv_instance(input_path=str(in_wav), online_write=False)
+                except Exception as exc:
+                    raise ModelInferenceError("Error en MossFormerGAN_SE_16K.", details=str(exc)) from exc
+                finally:
+                    os.chdir(prev_cwd)
+                return np.asarray(raw_out, dtype=np.float32).reshape(-1)
+
+        for ch in range(buffer.channels):
+            out_channels[ch] = process_in_chunks(
+                buffer.samples[ch],
+                16000,
+                chunk_seconds=CHUNK_SECONDS,
+                overlap_seconds=OVERLAP_SECONDS,
+                infer=infer,
+                cancel_token=cancel_token,
+                progress=(
+                    (lambda f, ch=ch: progress_cb(
+                        0.15 + 0.35 * (ch + f) / buffer.channels, "Procesando MossFormerGAN_SE_16K..."
+                    ))
+                    if progress_cb
+                    else None
+                ),
+            )
 
         return AudioBuffer(samples=out_channels, sample_rate=16000)
